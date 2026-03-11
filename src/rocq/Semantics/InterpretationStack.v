@@ -5,6 +5,8 @@ From ITree Require Import
      Events.StateFacts
      Eq.Eqit.
 
+From Stdlib Require Import ZArith.
+
 From Vellvm Require Import
      Utilities
      Semantics.LLVMEvents
@@ -44,6 +46,33 @@ Module Type InterpreterStack_common (LP : LLVMParams) (MEM : Memory LP).
   Import LLVM.Local.
   Import LLVM.Stack.
   Import LLVM.D.
+
+  (** Extract address from a MemoryE Load/Store event at L2.
+      Returns Some (positive for Load, negative for Store), or None. *)
+  Definition mem_event_addr {X} (e : L2 X) : option Z :=
+    match e with
+    | inr1 (inr1 (inl1 (Load _ (DVALUE_Addr a)))) => Some (LP.PTOI.ptr_to_int a)
+    | inr1 (inr1 (inl1 (Store _ (DVALUE_Addr a) _))) => Some (Z.opp (LP.PTOI.ptr_to_int a))
+    | _ => None
+    end.
+
+  (** Walk an itree at L2 and record Load/Store addresses.
+      Convention: positive Z = Load, negative Z = Store.
+      Defined outside Section since Unset Guard Checking is
+      not allowed inside sections. *)
+  Unset Guard Checking.
+  CoFixpoint observe_L2 {R} (obs : list Z) (t : itree L2 R) : itree L2 (list Z * R) :=
+    match ITreeDefinition.observe t with
+    | ITreeDefinition.RetF r => Ret (List.rev obs, r)
+    | ITreeDefinition.TauF t' => Tau (observe_L2 obs t')
+    | @ITreeDefinition.VisF _ _ _ X e k =>
+        let obs' := match mem_event_addr e with
+                    | Some z => cons z obs
+                    | None => obs
+                    end in
+        Vis e (fun x : X => observe_L2 obs' (k x))
+    end.
+  Set Guard Checking.
 
   Section InterpreterMCFG.
     Context {MemM : Type -> Type}.
@@ -96,6 +125,16 @@ Module Type InterpreterStack_common (LP : LLVMParams) (MEM : Memory LP).
       let L1_trace       := interp_global uvalue_trace g in
       let L2_trace       := interp_local_stack L1_trace l in
       let L3_trace       := interp_memory L2_trace sid m in
+      let L4_trace       := exec_undef L3_trace in
+      L4_trace.
+
+    (** Like interp_mcfg4_exec but inserts observe_L2 at L2. *)
+    Definition interp_mcfg4_exec_obs {R} (t: itree L0 R) g l sid m :=
+      let uvalue_trace   := interp_intrinsics t in
+      let L1_trace       := interp_global uvalue_trace g in
+      let L2_trace       := interp_local_stack L1_trace l in
+      let L2_obs         := observe_L2 nil L2_trace in
+      let L3_trace       := interp_memory L2_obs sid m in
       let L4_trace       := exec_undef L3_trace in
       L4_trace.
 

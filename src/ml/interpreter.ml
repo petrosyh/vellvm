@@ -170,3 +170,72 @@ let interpret
            list )
     : (DV.dvalue, exit_condition) result =
   step (TopLevel.TopLevelBigIntptr.interpreter (List.map Camlcoq.coqstring_of_camlstring args) prog)
+
+(** Interpret a program where main takes a single i32 argument (the "secret" for NI testing).
+    The secret integer is passed directly as a UVALUE_I 32 to main, bypassing the
+    standard argc/argv mechanism. *)
+let interpret_with_i32
+      (secret : int)
+      (prog :
+         ( LLVMAst.typ
+         , LLVMAst.typ LLVMAst.block * LLVMAst.typ LLVMAst.block list )
+           LLVMAst.toplevel_entity
+           list )
+    : (DV.dvalue, exit_condition) result =
+  (* Build positive for 32: 2^5 = 32 = xO(xO(xO(xO(xO(xH))))) *)
+  let sz32 = BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO BinNums.Coq_xH)))) in
+  let secret_uval = DV.UVALUE_I (sz32, Integers.repr sz32 (Camlcoq.Z.of_sint secret)) in
+  (* itree that immediately returns [secret_uval] *)
+  let args_itree = lazy (ITreeDefinition.Coq_go (ITreeDefinition.RetF (Obj.magic [secret_uval]))) in
+  step (TopLevel.TopLevelBigIntptr.interpreter_gen
+    (DynamicTypes.DTYPE_I sz32)
+    ('m'::('a'::('i'::('n'::[]))))
+    args_itree
+    prog)
+
+(** Like interpret_with_i32 but collects Load/Store observations using
+    the Rocq-native observe_L2 pipeline (no MemoryModel.ml patching needed).
+    Returns (observation_list, dvalue_result). *)
+let interpret_with_i32_obs
+      (secret : int)
+      (prog :
+         ( LLVMAst.typ
+         , LLVMAst.typ LLVMAst.block * LLVMAst.typ LLVMAst.block list )
+           LLVMAst.toplevel_entity
+           list )
+    : (BinNums.coq_Z list * DV.dvalue, exit_condition) result =
+  let sz32 = BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO BinNums.Coq_xH)))) in
+  let secret_uval = DV.UVALUE_I (sz32, Integers.repr sz32 (Camlcoq.Z.of_sint secret)) in
+  let args_itree = lazy (ITreeDefinition.Coq_go (ITreeDefinition.RetF (Obj.magic [secret_uval]))) in
+  let t = TopLevel.TopLevelBigIntptr.interpreter_gen_obs
+    (DynamicTypes.DTYPE_I sz32)
+    ('m'::('a'::('i'::('n'::[]))))
+    args_itree
+    prog in
+  (* step_obs: like step but extracts (obs, dvalue) from the deeper nesting *)
+  let rec step_obs m =
+    let open ITreeDefinition in
+    match observe m with
+    | TauF x -> step_obs x
+    (* Result: (MemState, (store_id, (obs, (local_env * stack, (global_env, dvalue))))) *)
+    | RetF (_, (_, (obs, (_, (_, v))))) -> Ok (obs, v)
+    | VisF (Sum.Coq_inl1 (ExternalCall (_, _, _)), _) ->
+        Error (UninterpretedCall "Uninterpreted external call")
+    | VisF (Sum.Coq_inl1 (IO_stdout bytes), k) ->
+        let str = string_of_bytes bytes in
+        output_bytes stdout str ;
+        step_obs (k (Obj.magic ()))
+    | VisF (Sum.Coq_inl1 (IO_stderr bytes), k) ->
+        let str = string_of_bytes bytes in
+        output_bytes stderr str ;
+        step_obs (k (Obj.magic ()))
+    | VisF (Sum.Coq_inr1 (Sum.Coq_inl1 _), _) ->
+        Error (OutOfMemory "")
+    | VisF (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inl1 _)), _) ->
+        Error (UndefinedBehavior "")
+    | VisF (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inl1 _))), k) ->
+        step_obs (k (Obj.magic DV.DVALUE_None))
+    | VisF (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inr1 _))), _) ->
+        Error (Failed "")
+  in
+  step_obs t

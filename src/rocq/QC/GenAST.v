@@ -3306,6 +3306,13 @@ Section InstrGenerators.
   Definition gen_main_tle : GenLLVM (toplevel_entity typ (block typ * list (block typ)))
     := ret TLE_Definition <*> gen_main.
 
+  (** Like gen_main, but main takes one i32 argument (the "secret" input for NI testing). *)
+  Definition gen_main_with_secret : GenLLVM (definition typ (block typ * list (block typ)))
+    := gen_definition (Name "main") (TYPE_I 8) [TYPE_I 32].
+
+  Definition gen_main_with_secret_tle : GenLLVM (toplevel_entity typ (block typ * list (block typ)))
+    := ret TLE_Definition <*> gen_main_with_secret.
+
   Definition gen_typ_tle : GenLLVM (toplevel_entity typ (block typ * list (block typ)))
     :=
     name <- new_local_id;;
@@ -3362,6 +3369,18 @@ Section InstrGenerators.
     globals <- gen_global_tle_multiple;;
     functions <- gen_helper_function_tle_multiple;;
     main <- gen_main_tle;;
+    res_globals <- get_global_memo;;
+    let new_globals := (globals ++ map TLE_Global res_globals)%list in
+    ret (high_levels ++ defined_typs ++ new_globals ++ functions ++ [main])%list.
+
+  (** Like gen_llvm, but main takes one i32 argument (the "secret" for NI testing). *)
+  Definition gen_llvm_with_secret : GenLLVM (list (toplevel_entity typ (block typ * list (block typ))))
+    :=
+    high_levels <- gen_list_high_level_tle;;
+    defined_typs <- gen_typ_tle_multiple;;
+    globals <- gen_global_tle_multiple;;
+    functions <- gen_helper_function_tle_multiple;;
+    main <- gen_main_with_secret_tle;;
     res_globals <- get_global_memo;;
     let new_globals := (globals ++ map TLE_Global res_globals)%list in
     ret (high_levels ++ defined_typs ++ new_globals ++ functions ++ [main])%list.

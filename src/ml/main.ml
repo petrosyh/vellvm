@@ -375,6 +375,12 @@ let args =
   ; ( "-interpret"
     , Set Driver.interpret
     , "interpret ll program starting from 'main'" )
+  ; ( "-interpret-obs"
+    , Set Driver.interpret_obs
+    , "interpret and output Load/Store observation trace" )
+  ; ( "-interpret-obs-secret"
+    , Int (fun n -> Driver.interpret_obs_secret := Some n)
+    , "like -interpret-obs but pass a single i32 secret argument to main" )
   ; ("-csmith", Unit runCSmith, "Run CSmith and run Vellvm")
   ; ( "-i"
     , Set Driver.interpret
