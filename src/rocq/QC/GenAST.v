@@ -3031,7 +3031,7 @@ Section InstrGenerators.
        ofun_ptr_typ <- gen_function_pointer_type;;
        osized_typ <- gen_sized_typ_in_context;;
        oneOf_LLVM
-         ([ op <- gen_op_instr;; t <- gen_op_typ;;
+         ([ op <- gen_op_instr;; t <- gen_op_typ;; (* dead code? *)
             ret [op]
             ; fmap ret gen_bitcast
            ]
