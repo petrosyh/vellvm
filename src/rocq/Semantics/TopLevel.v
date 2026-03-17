@@ -571,6 +571,19 @@ Module Type LLVMTopLevel (IS : InterpreterStack).
         (convert_types (mcfg_of_tle (link PREDEFINED_FUNCTIONS prog)))
     in interp_mcfg4_exec t [] ([],[]) 0 initial_memory_state.
 
+  (** Like interpreter_gen but collects Load/Store observations at L2. *)
+  Definition interpreter_gen_obs
+    (ret_typ : dtyp)
+    (entry : string)
+    (arg_gen : itree L0 (list uvalue))
+    (prog: ll_toplevel_entities)
+    :=
+    let t :=
+      args <- arg_gen;;
+      denote_vellvm ret_typ entry args
+        (convert_types (mcfg_of_tle (link PREDEFINED_FUNCTIONS prog)))
+    in interp_mcfg4_exec_obs t [] ([],[]) 0 initial_memory_state.
+
   (**
      Finally, the reference interpreter assumes no user-defined intrinsics and starts
      from "main" using bogus initial inputs.

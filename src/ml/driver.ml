@@ -18,6 +18,8 @@ let of_str = Camlcoq.camlstring_of_coqstring
 let string_of_dvalue (d : DV.dvalue) = of_str (DV.show_dvalue d)
 
 let interpret = ref false
+let interpret_obs = ref false
+let interpret_obs_secret : int option ref = ref None
 
 let transform
     (prog :
@@ -69,11 +71,44 @@ let process_ll_file command_line_arguments path file =
   let _ = Platform.verb @@ Printf.sprintf "* processing file: %s\n" path in
   let ll_ast = IO.parse_file path in
   let _ =
-    if !interpret then
-      match Interpreter.interpret command_line_arguments ll_ast with
-      | Ok dv ->
-          Printf.printf "Program terminated with: %s\n" (string_of_dvalue dv)
-      | Error e -> failwith (Result.string_of_exit_condition e)
+    if !interpret || !interpret_obs || !interpret_obs_secret <> None then begin
+      match !interpret_obs_secret with
+      | Some secret ->
+          (* Use Rocq-native observation pipeline (observe_L2) *)
+          let result = Interpreter.interpret_with_i32_obs secret ll_ast in
+          (match result with
+          | Ok (obs, dv) ->
+              Printf.printf "Program terminated with: %s\n" (string_of_dvalue dv);
+              Printf.printf "---OBS_TRACE_BEGIN---\n";
+              let rec print_coq_z_list = function
+                | [] -> ()
+                | z :: rest ->
+                    Printf.printf "%d\n" (Camlcoq.Z.to_int z);
+                    print_coq_z_list rest
+              in
+              print_coq_z_list obs;
+              Printf.printf "---OBS_TRACE_END---\n"
+          | Error e ->
+              Printf.printf "Program error: %s\n" (Result.string_of_exit_condition e))
+      | None ->
+          let collecting_obs = !interpret_obs in
+          if collecting_obs then begin
+            Obs_trace.obs_enabled := true;
+            Obs_trace.clear ()
+          end;
+          let result = Interpreter.interpret command_line_arguments ll_ast in
+          (match result with
+          | Ok dv ->
+              Printf.printf "Program terminated with: %s\n" (string_of_dvalue dv)
+          | Error e ->
+              Printf.printf "Program error: %s\n" (Result.string_of_exit_condition e));
+          if collecting_obs then begin
+            Printf.printf "---OBS_TRACE_BEGIN---\n";
+            Obs_trace.print_trace ();
+            Printf.printf "---OBS_TRACE_END---\n";
+            Obs_trace.obs_enabled := false
+          end
+    end
   in
   let ll_ast' = transform ll_ast in
   let vll_file = Platform.gen_name !Platform.output_path file ".v.ll" in

@@ -290,6 +290,112 @@ Defined.
 Definition gen_PROG : GenLLVM PROG
   := fmap Prog gen_llvm.
 
+(** Generator for programs where main takes one i32 argument (the secret). *)
+Definition gen_PROG_with_secret : GenLLVM PROG
+  := fmap Prog gen_llvm_with_secret.
+
+(* ================================================================= *)
+(** ** Non-Interference Testing                                       *)
+(* ================================================================= *)
+
+(** An observation is a memory event visible to an attacker.
+    We only consider Load and Store addresses (not values). *)
+Inductive observation : Type :=
+| OLoad  (addr : Z)   (* address read from *)
+| OStore (addr : Z).  (* address written to *)
+
+Definition obs_trace := list observation.
+
+Definition show_observation (o : observation) : string :=
+  match o with
+  | OLoad addr => "L(" ++ show addr ++ ")"
+  | OStore addr => "S(" ++ show addr ++ ")"
+  end.
+
+#[global] Instance Show_observation : Show observation :=
+  {| show := show_observation |}.
+
+Definition show_obs_trace (t : obs_trace) : string :=
+  "[" ++ String.concat ", " (List.map show_observation t) ++ "]".
+
+#[global] Instance Show_obs_trace : Show obs_trace :=
+  {| show := show_obs_trace |}.
+
+Definition obs_eqb (o1 o2 : observation) : bool :=
+  match o1, o2 with
+  | OLoad a1, OLoad a2 => Z.eqb a1 a2
+  | OStore a1, OStore a2 => Z.eqb a1 a2
+  | _, _ => false
+  end.
+
+Fixpoint obs_trace_eqb (t1 t2 : obs_trace) : bool :=
+  match t1, t2 with
+  | nil, nil => true
+  | o1 :: t1', o2 :: t2' => obs_eqb o1 o2 && obs_trace_eqb t1' t2'
+  | _, _ => false
+  end.
+
+Definition z_to_obs (zs : list Z) : obs_trace :=
+  List.map (fun z => if Z.ltb z 0 then OStore (Z.opp z) else OLoad z) zs.
+
+(** Collect Load/Store observations via the Rocq-native pipeline.
+    Shells out to: ./vellvm -interpret-obs-secret <secret> <file>
+    The binary uses interpreter_gen_obs (observe_L2 at L2) internally.
+
+    Note: shell-out is required because QuickChick's extraction
+    cannot handle direct calls to the pipeline (exec_correct_post issue). *)
+Axiom vellvm_collect_obs :
+  list (toplevel_entity typ (block typ * list (block typ))) -> Z -> list Z.
+
+Extract Constant vellvm_collect_obs =>
+  "fun prog secret ->
+     let llvm_file_name = Filename.(concat (get_temp_dir_name ()) ""temporary_vellvm_obs.ll"") in
+     let oc = open_out llvm_file_name in
+     let fmt = Format.formatter_of_out_channel oc in
+     Llvm_printer.toplevel_entities fmt prog;
+     Format.pp_print_flush fmt ();
+     close_out oc;
+     let secret_int = Big_int_Z.int_of_big_int secret in
+     let cmd = ""timeout 5 ./vellvm -interpret-obs-secret "" ^ string_of_int secret_int ^ "" "" ^ llvm_file_name ^ "" 2>&1"" in
+     let ic = Unix.open_process_in cmd in
+     let buf = Buffer.create 256 in
+     (try while true do Buffer.add_channel buf ic 1 done with End_of_file -> ());
+     let _ = Unix.close_process_in ic in
+     let output = Buffer.contents buf in
+     let lines = String.split_on_char '\n' output in
+     let int_to_z n = Big_int_Z.big_int_of_int n in
+     let in_trace = ref false in
+     let result = ref [] in
+     List.iter (fun line ->
+       if line = ""---OBS_TRACE_BEGIN---"" then in_trace := true
+       else if line = ""---OBS_TRACE_END---"" then in_trace := false
+       else if !in_trace then
+         (try result := (int_to_z (int_of_string line)) :: !result
+          with _ -> ())
+     ) lines;
+     List.rev !result".
+
+(** NI test: generate a program with a secret i32 argument,
+    run with two different secrets, compare observation traces.
+    If traces differ, the program leaks information about the secret
+    through its memory access pattern. *)
+Definition vellvm_ni (p : string + PROG) : Checker :=
+  match p with
+  | inl msg => checker tt
+  | inr (Prog prog) =>
+      forAll (choose (-100%Z, 100%Z)) (fun secret1 : Z =>
+      forAll (choose (-100%Z, 100%Z)) (fun secret2 : Z =>
+        let obs1 := z_to_obs (vellvm_collect_obs prog secret1) in
+        let obs2 := z_to_obs (vellvm_collect_obs prog secret2) in
+        if obs_trace_eqb obs1 obs2
+        then checker true
+        else whenFail ("NI violation!"
+                    ++ " secret1=" ++ show secret1
+                    ++ " secret2=" ++ show secret2
+                    ++ " | trace1=" ++ show obs1
+                    ++ " | trace2=" ++ show obs2) false))
+  end.
+
 (* Definition agrees := (forAll (run_GenLLVM gen_llvm) vellvm_agrees_with_clang). *)
 
 Extract Constant defNumTests    => "1000".
@@ -300,10 +406,9 @@ Extract Constant defNumTests    => "1000".
 QCInclude "ml/*".
 QCInclude "ml/libvellvm/*".
 
-
 (* QCInclude "../../ml/libvellvm/llvm_printer.ml". *)
 (* QCInclude "../../ml/libvellvm/Camlcoq.ml". *)
 (* QCInclude "../../ml/extracted/*ml". *)
 Extract Inlined Constant Error.failwith => "(fun _ -> raise)".
-QuickChick (forAll (run_GenLLVM gen_PROG) vellvm_binary_agrees_with_clang).
+QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_ni).
 (*! QuickChick agrees. *)
