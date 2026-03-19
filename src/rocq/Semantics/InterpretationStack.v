@@ -49,10 +49,12 @@ Module Type InterpreterStack_common (LP : LLVMParams) (MEM : Memory LP).
 
   (** Extract address from a MemoryE Load/Store event at L2.
       Returns Some (positive for Load, negative for Store), or None. *)
-  Definition mem_event_addr {X} (e : L2 X) : option Z :=
+  Definition event_obs {X} (e : L2 X) : option Z :=
     match e with
     | inr1 (inr1 (inl1 (Load _ (DVALUE_Addr a)))) => Some (LP.PTOI.ptr_to_int a)
     | inr1 (inr1 (inl1 (Store _ (DVALUE_Addr a) _))) => Some (Z.opp (LP.PTOI.ptr_to_int a))
+    | inr1 (inr1 (inr1 (inr1 (inr1 (inr1 (inl1 (DebugBranch true))))))) => Some 1000000%Z
+    | inr1 (inr1 (inr1 (inr1 (inr1 (inr1 (inl1 (DebugBranch false))))))) => Some 1000001%Z
     | _ => None
     end.
 
@@ -66,7 +68,7 @@ Module Type InterpreterStack_common (LP : LLVMParams) (MEM : Memory LP).
     | ITreeDefinition.RetF r => Ret (List.rev obs, r)
     | ITreeDefinition.TauF t' => Tau (observe_L2 obs t')
     | @ITreeDefinition.VisF _ _ _ X e k =>
-        let obs' := match mem_event_addr e with
+        let obs' := match event_obs e with
                     | Some z => cons z obs
                     | None => obs
                     end in

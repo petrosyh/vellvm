@@ -69,6 +69,8 @@ CoFixpoint step (t : ITreeDefinition.itree L4 res_L4) : MlResult dvalue string
          MlError _ string ("UB")%string
      | VisF (inr1 (inr1 (inr1 (inl1 (Debug msg))))) k =>
          MlError _ string ("Debug")%string
+     | VisF (inr1 (inr1 (inr1 (inl1 (DebugBranch _))))) k =>
+         MlError _ string ("Debug")%string
      | VisF (inr1 (inr1 (inr1 (inr1 (LLVMEvents.Throw msg))))) k =>
          MlError _ string ("Failure")%string
      end.
@@ -298,11 +300,12 @@ Definition gen_PROG_with_secret : GenLLVM PROG
 (** ** Non-Interference Testing                                       *)
 (* ================================================================= *)
 
-(** An observation is a memory event visible to an attacker.
-    We only consider Load and Store addresses (not values). *)
+(** An observation is an event visible to an attacker.
+    Load/Store addresses and branch directions. *)
 Inductive observation : Type :=
-| OLoad  (addr : Z)   (* address read from *)
-| OStore (addr : Z).  (* address written to *)
+| OLoad   (addr : Z)   (* address read from *)
+| OStore  (addr : Z)   (* address written to *)
+| OBranch (b : bool).  (* conditional branch direction: true or false *)
 
 Definition obs_trace := list observation.
 
@@ -310,6 +313,8 @@ Definition show_observation (o : observation) : string :=
   match o with
   | OLoad addr => "L(" ++ show addr ++ ")"
   | OStore addr => "S(" ++ show addr ++ ")"
+  | OBranch true => "Br(T)"
+  | OBranch false => "Br(F)"
   end.
 
 #[global] Instance Show_observation : Show observation :=
@@ -325,6 +330,7 @@ Definition obs_eqb (o1 o2 : observation) : bool :=
   match o1, o2 with
   | OLoad a1, OLoad a2 => Z.eqb a1 a2
   | OStore a1, OStore a2 => Z.eqb a1 a2
+  | OBranch b1, OBranch b2 => Bool.eqb b1 b2
   | _, _ => false
   end.
 
@@ -336,7 +342,11 @@ Fixpoint obs_trace_eqb (t1 t2 : obs_trace) : bool :=
   end.
 
 Definition z_to_obs (zs : list Z) : obs_trace :=
-  List.map (fun z => if Z.ltb z 0 then OStore (Z.opp z) else OLoad z) zs.
+  List.map (fun z =>
+    if Z.eqb z 1000000 then OBranch true
+    else if Z.eqb z 1000001 then OBranch false
+    else if Z.ltb z 0 then OStore (Z.opp z)
+    else OLoad z) zs.
 
 (** Collect Load/Store observations via the Rocq-native pipeline.
     Shells out to: ./vellvm -interpret-obs-secret <secret> <file>
