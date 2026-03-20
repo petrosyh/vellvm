@@ -23,6 +23,8 @@ From ITree Require Import
 (* From QuickChick Require Import QuickChick. *)
 From QuickChick Require Import Show Checker Generators Producer Test.
 From Vellvm Require Import ShowAST ReprAST GenAST TopLevel LLVMAst DynamicValues VellvmIntegers.
+From Vellvm.QC Require Import TaintTracking.
+
 
 Extraction Blacklist String List Char Core Z Format int.
 
@@ -359,6 +361,7 @@ Axiom vellvm_collect_obs :
 
 Extract Constant vellvm_collect_obs =>
   "fun prog secret ->
+     let prog = (Obj.magic prog : (LLVMAst.typ, LLVMAst.typ LLVMAst.block * LLVMAst.typ LLVMAst.block list) LLVMAst.toplevel_entity list) in
      let llvm_file_name = Filename.(concat (get_temp_dir_name ()) ""temporary_vellvm_obs.ll"") in
      let oc = open_out llvm_file_name in
      let fmt = Format.formatter_of_out_channel oc in
@@ -408,6 +411,30 @@ Definition vellvm_ni (p : string + PROG) : Checker :=
 
 (* Definition agrees := (forAll (run_GenLLVM gen_llvm) vellvm_agrees_with_clang). *)
 
+(** NI test guided by taint analysis.
+    - If traces match: always pass.
+    - If traces differ AND taint said leaked: pass (expected).
+    - If traces differ AND taint said safe: FAIL (taint analysis false negative). *)
+Definition vellvm_ni_taint (p : string + PROG) : Checker :=
+  match p with
+  | inl msg => checker tt
+  | inr (Prog prog) =>
+      forAll (choose (-100%Z, 100%Z)) (fun secret1 : Z =>
+      forAll (choose (-100%Z, 100%Z)) (fun secret2 : Z =>
+        let obs1 := z_to_obs (vellvm_collect_obs prog secret1) in
+        let obs2 := z_to_obs (vellvm_collect_obs prog secret2) in
+        let traces_match := obs_trace_eqb obs1 obs2 in
+        if traces_match
+        then checker true
+        else if secret_is_leaked prog
+        then checker true  (* taint predicted this, OK *)
+        else whenFail ("TAINT FALSE NEGATIVE: taint said safe but NI violated!"
+                    ++ " secret1=" ++ show secret1
+                    ++ " secret2=" ++ show secret2
+                    ++ " | trace1=" ++ show obs1
+                    ++ " | trace2=" ++ show obs2) false))
+  end.
+
 Extract Constant defNumTests    => "1000".
 
 (* SAZ: These paths are relative to where the coqc command that runs the extraction is executed.
@@ -420,5 +447,5 @@ QCInclude "ml/libvellvm/*".
 (* QCInclude "../../ml/libvellvm/Camlcoq.ml". *)
 (* QCInclude "../../ml/extracted/*ml". *)
 Extract Inlined Constant Error.failwith => "(fun _ -> raise)".
-QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_ni).
+QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_ni_taint).
 (*! QuickChick agrees. *)

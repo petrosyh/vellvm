@@ -49,6 +49,7 @@
 ./rocq/QC/ShowAST.v
 ./rocq/QC/Utils.v
 ./rocq/QC/DList.v
+./rocq/QC/TaintTracking.v
 ./rocq/Semantics.v
 ./rocq/Semantics/ConcretizationParams.v
 ./rocq/Semantics/Denotation.v
