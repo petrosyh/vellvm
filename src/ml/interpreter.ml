@@ -239,3 +239,14 @@ let interpret_with_i32_obs
         Error (Failed "")
   in
   step_obs t
+
+(** Run taint analysis on a program (pure AST, Layer 1).
+    Returns the list of leaked variable names as raw_id list. *)
+let taint_analyze
+      (prog :
+         ( LLVMAst.typ
+         , LLVMAst.typ LLVMAst.block * LLVMAst.typ LLVMAst.block list )
+           LLVMAst.toplevel_entity
+           list )
+    : LLVMAst.raw_id list =
+  TaintTrackingSemantic.taint_program_gen (Obj.magic prog)

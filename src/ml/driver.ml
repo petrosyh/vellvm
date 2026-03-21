@@ -20,6 +20,7 @@ let string_of_dvalue (d : DV.dvalue) = of_str (DV.show_dvalue d)
 let interpret = ref false
 let interpret_obs = ref false
 let interpret_obs_secret : int option ref = ref None
+let taint_track = ref false
 
 let transform
     (prog :
@@ -108,6 +109,25 @@ let process_ll_file command_line_arguments path file =
             Printf.printf "---OBS_TRACE_END---\n";
             Obs_trace.obs_enabled := false
           end
+    end;
+    if !taint_track then begin
+      let leaked = Interpreter.taint_analyze ll_ast in
+      Printf.printf "---TAINT_BEGIN---\n";
+      let rec print_raw_ids = function
+        | [] -> ()
+        | id :: rest ->
+            (match id with
+            | LLVMAst.Name s ->
+                List.iter (fun c -> Printf.printf "%c" c) s;
+                Printf.printf "\n"
+            | LLVMAst.Anon n ->
+                Printf.printf "anon_%d\n" (Camlcoq.Z.to_int n)
+            | LLVMAst.Raw n ->
+                Printf.printf "raw_%d\n" (Camlcoq.Z.to_int n));
+            print_raw_ids rest
+      in
+      print_raw_ids leaked;
+      Printf.printf "---TAINT_END---\n"
     end
   in
   let ll_ast' = transform ll_ast in

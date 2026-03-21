@@ -381,6 +381,9 @@ let args =
   ; ( "-interpret-obs-secret"
     , Int (fun n -> Driver.interpret_obs_secret := Some n)
     , "like -interpret-obs but pass a single i32 secret argument to main" )
+  ; ( "-taint-track"
+    , Set Driver.taint_track
+    , "run taint analysis and output leaked variable names" )
   ; ("-csmith", Unit runCSmith, "Run CSmith and run Vellvm")
   ; ( "-i"
     , Set Driver.interpret

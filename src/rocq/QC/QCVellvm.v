@@ -389,6 +389,38 @@ Extract Constant vellvm_collect_obs =>
      ) lines;
      List.rev !result".
 
+(** Shell-out taint analysis.
+    Runs: ./vellvm -taint-track <file>
+    Returns true if the taint tracker says any secret flows into observations. *)
+Axiom vellvm_taint_leaked :
+  list (toplevel_entity typ (block typ * list (block typ))) -> bool.
+
+Extract Constant vellvm_taint_leaked =>
+  "fun prog ->
+     let prog = (Obj.magic prog : (LLVMAst.typ, LLVMAst.typ LLVMAst.block * LLVMAst.typ LLVMAst.block list) LLVMAst.toplevel_entity list) in
+     let llvm_file_name = Filename.(concat (get_temp_dir_name ()) ""temporary_vellvm_taint.ll"") in
+     let oc = open_out llvm_file_name in
+     let fmt = Format.formatter_of_out_channel oc in
+     Llvm_printer.toplevel_entities fmt prog;
+     Format.pp_print_flush fmt ();
+     close_out oc;
+     let cmd = ""timeout 5 ./vellvm -taint-track "" ^ llvm_file_name ^ "" 2>&1"" in
+     let ic = Unix.open_process_in cmd in
+     let buf = Buffer.create 256 in
+     (try while true do Buffer.add_channel buf ic 1 done with End_of_file -> ());
+     let _ = Unix.close_process_in ic in
+     let output = Buffer.contents buf in
+     let lines = String.split_on_char '\n' output in
+     let in_taint = ref false in
+     let found_leak = ref false in
+     List.iter (fun line ->
+       if line = ""---TAINT_BEGIN---"" then in_taint := true
+       else if line = ""---TAINT_END---"" then in_taint := false
+       else if !in_taint && String.length line > 0 then
+         found_leak := true
+     ) lines;
+     !found_leak".
+
 (** NI test: generate a program with a secret i32 argument,
     run with two different secrets, compare observation traces.
     If traces differ, the program leaks information about the secret
@@ -447,14 +479,14 @@ Definition vellvm_taint_soundness (p : string + PROG) : Checker :=
   match p with
   | inl msg => checker tt
   | inr (Prog prog) =>
-      let leaked := taint_program_typ prog in
+      let leaked := vellvm_taint_leaked prog in
       forAll (choose (-100%Z, 100%Z)) (fun val1 : Z =>
       forAll (choose (-100%Z, 100%Z)) (fun val2 : Z =>
         (* Generate public-equivalent inputs:
            - If the arg is tainted (in tobs): both runs use SAME value (val1)
            - If the arg is NOT tainted: runs use DIFFERENT values (val1, val2) *)
         let secret1 := val1 in
-        let secret2 := if secret_is_leaked_semantic prog
+        let secret2 := if leaked
                         then val1    (* tainted → keep same = public-equivalent *)
                         else val2    (* untainted → can differ freely *)
                         in
@@ -463,7 +495,7 @@ Definition vellvm_taint_soundness (p : string + PROG) : Checker :=
         if obs_trace_eqb obs1 obs2
         then checker true
         else whenFail ("TAINT UNSOUND: public-equivalent inputs produced different traces!"
-                    ++ " num_leaked=" ++ show (List.length leaked)
+                    ++ " leaked=" ++ show leaked
                     ++ " secret1=" ++ show secret1
                     ++ " secret2=" ++ show secret2
                     ++ " | trace1=" ++ show obs1
@@ -483,7 +515,7 @@ Definition vellvm_taint_precision (p : string + PROG) : Checker :=
   match p with
   | inl msg => checker tt
   | inr (Prog prog) =>
-      let leaked := secret_is_leaked_semantic prog in
+      let leaked := vellvm_taint_leaked prog in
       forAll (choose (-100%Z, 100%Z)) (fun secret1 : Z =>
       forAll (choose (-100%Z, 100%Z)) (fun secret2 : Z =>
         let obs1 := z_to_obs (vellvm_collect_obs prog secret1) in
@@ -516,6 +548,6 @@ QCInclude "ml/libvellvm/*".
 (* QCInclude "../../ml/libvellvm/Camlcoq.ml". *)
 (* QCInclude "../../ml/extracted/*ml". *)
 Extract Inlined Constant Error.failwith => "(fun _ -> raise)".
-(* QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_taint_soundness). *)
-QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_taint_precision).
+QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_taint_soundness).
+(* QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_taint_precision). *)
 (*! QuickChick agrees. *)
