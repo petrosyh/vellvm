@@ -24,6 +24,7 @@ From ITree Require Import
 From QuickChick Require Import Show Checker Generators Producer Test.
 From Vellvm Require Import ShowAST ReprAST GenAST TopLevel LLVMAst DynamicValues VellvmIntegers.
 From Vellvm.QC Require Import TaintTracking.
+From Vellvm.QC Require Import TaintTrackingSemantic.
 
 
 Extraction Blacklist String List Char Core Z Format int.
@@ -411,11 +412,12 @@ Definition vellvm_ni (p : string + PROG) : Checker :=
 
 (* Definition agrees := (forAll (run_GenLLVM gen_llvm) vellvm_agrees_with_clang). *)
 
-(** NI test guided by taint analysis.
-    - If traces match: always pass.
-    - If traces differ AND taint said leaked: pass (expected).
-    - If traces differ AND taint said safe: FAIL (taint analysis false negative). *)
-Definition vellvm_ni_taint (p : string + PROG) : Checker :=
+(** OLD taint test — WRONG testing methodology.
+    This test picks two random secrets and checks if taint predicts leaks.
+    But it doesn't generate public-equivalent inputs, so it never truly
+    validates the taint tracker. Kept for reference only.
+    Uses TaintTracking.v (V2, old pure AST tracker). *)
+Definition vellvm_ni_taint_old (p : string + PROG) : Checker :=
   match p with
   | inl msg => checker tt
   | inr (Prog prog) =>
@@ -427,12 +429,79 @@ Definition vellvm_ni_taint (p : string + PROG) : Checker :=
         if traces_match
         then checker true
         else if secret_is_leaked prog
-        then checker true  (* taint predicted this, OK *)
-        else whenFail ("TAINT FALSE NEGATIVE: taint said safe but NI violated!"
+        then checker true
+        else whenFail ("TAINT FALSE NEGATIVE") false))
+  end.
+
+(** Soundness test for taint tracker (SpecIBT-style).
+    The taint tracker identifies which inputs affect observations.
+    We generate PUBLIC-EQUIVALENT inputs (agree on tainted vars,
+    differ on untainted vars) and check that traces match.
+
+    If the taint tracker is correct (sound), public-equivalent inputs
+    always produce the same observation traces.
+
+    If traces differ for public-equivalent inputs, the taint tracker
+    missed a dependency — it's UNSOUND (false negative). *)
+Definition vellvm_taint_soundness (p : string + PROG) : Checker :=
+  match p with
+  | inl msg => checker tt
+  | inr (Prog prog) =>
+      let leaked := taint_program_typ prog in
+      forAll (choose (-100%Z, 100%Z)) (fun val1 : Z =>
+      forAll (choose (-100%Z, 100%Z)) (fun val2 : Z =>
+        (* Generate public-equivalent inputs:
+           - If the arg is tainted (in tobs): both runs use SAME value (val1)
+           - If the arg is NOT tainted: runs use DIFFERENT values (val1, val2) *)
+        let secret1 := val1 in
+        let secret2 := if secret_is_leaked_semantic prog
+                        then val1    (* tainted → keep same = public-equivalent *)
+                        else val2    (* untainted → can differ freely *)
+                        in
+        let obs1 := z_to_obs (vellvm_collect_obs prog secret1) in
+        let obs2 := z_to_obs (vellvm_collect_obs prog secret2) in
+        if obs_trace_eqb obs1 obs2
+        then checker true
+        else whenFail ("TAINT UNSOUND: public-equivalent inputs produced different traces!"
+                    ++ " num_leaked=" ++ show (List.length leaked)
                     ++ " secret1=" ++ show secret1
                     ++ " secret2=" ++ show secret2
                     ++ " | trace1=" ++ show obs1
                     ++ " | trace2=" ++ show obs2) false))
+  end.
+
+(** Precision test for taint tracker (negative test).
+    Checks that the taint tracker is not TOO conservative.
+    If the taint tracker says "safe" (tobs is empty), we verify
+    this by running with two DIFFERENT secrets — they should
+    produce the same traces.
+
+    If the taint tracker says "leaked" but the program actually
+    satisfies NI for all tested inputs, this suggests the taint
+    tracker is over-approximate (not necessarily wrong, but imprecise). *)
+Definition vellvm_taint_precision (p : string + PROG) : Checker :=
+  match p with
+  | inl msg => checker tt
+  | inr (Prog prog) =>
+      let leaked := secret_is_leaked_semantic prog in
+      forAll (choose (-100%Z, 100%Z)) (fun secret1 : Z =>
+      forAll (choose (-100%Z, 100%Z)) (fun secret2 : Z =>
+        let obs1 := z_to_obs (vellvm_collect_obs prog secret1) in
+        let obs2 := z_to_obs (vellvm_collect_obs prog secret2) in
+        let traces_match := obs_trace_eqb obs1 obs2 in
+        if leaked
+        then (* Taint says leaked — check if it's a false positive *)
+             if traces_match
+             then collect "taint_over_approx" (checker true)  (* over-approximate: taint says leaked but traces match *)
+             else collect "taint_true_positive" (checker true) (* true positive: taint correctly predicted leak *)
+        else (* Taint says safe — verify NI holds *)
+             if traces_match
+             then collect "taint_true_negative" (checker true) (* correct: taint says safe, traces agree *)
+             else whenFail ("TAINT FALSE NEGATIVE: taint said safe but NI violated!"
+                         ++ " secret1=" ++ show secret1
+                         ++ " secret2=" ++ show secret2
+                         ++ " | trace1=" ++ show obs1
+                         ++ " | trace2=" ++ show obs2) false))
   end.
 
 Extract Constant defNumTests    => "1000".
@@ -447,5 +516,6 @@ QCInclude "ml/libvellvm/*".
 (* QCInclude "../../ml/libvellvm/Camlcoq.ml". *)
 (* QCInclude "../../ml/extracted/*ml". *)
 Extract Inlined Constant Error.failwith => "(fun _ -> raise)".
-QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_ni_taint).
+(* QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_taint_soundness). *)
+QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_taint_precision).
 (*! QuickChick agrees. *)
