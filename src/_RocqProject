@@ -51,6 +51,7 @@
 ./rocq/QC/DList.v
 ./rocq/QC/TaintTracking.v
 ./rocq/QC/TaintTrackingSemantic.v
+./rocq/QC/TaintTrackingPure.v
 ./rocq/Semantics.v
 ./rocq/Semantics/ConcretizationParams.v
 ./rocq/Semantics/Denotation.v

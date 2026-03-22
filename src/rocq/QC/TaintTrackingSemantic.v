@@ -1,13 +1,15 @@
-(** * Semantic Taint Tracking for Vellvm NI Testing
-    Wraps the real denotation functions (denote_instr, denote_block, etc.)
-    while threading taint state alongside execution.
+(** * Taint Tracking for Vellvm NI Testing
 
     This file provides:
-    1. Polymorphic taint functions that work with any type parameter T
-       (both typ and dtyp)
-    2. Option B: semantic taint tracking with memory taint via
+    1. Core taint types and operations (taint, tstate, join_taints, etc.)
+    2. Polymorphic expression/instruction taint calculators (calc_taint_exp, taint_instr_pure)
+       — shared by both the pure AST analysis (Layer 1, see TaintTrackingPure.v)
+       and the semantic analysis (Layer 2 / Option B, below)
+    3. Option B: semantic taint tracking with memory taint via
        duplicated Load/Store cases that access concrete addresses
-    3. Integration with QCVellvm.v for NI testing
+       (Module SemanticTaint)
+
+    The pure AST analysis (Layer 1 legacy) is in TaintTrackingPure.v.
 *)
 
 From Stdlib Require Import List String ZArith Bool.
