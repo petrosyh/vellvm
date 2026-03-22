@@ -384,6 +384,12 @@ let args =
   ; ( "-taint-track"
     , Set Driver.taint_track
     , "run taint analysis and output leaked variable names" )
+  ; ( "-interpret-obs-args"
+    , String (fun s -> Driver.interpret_obs_args := Some s)
+    , "interpret with comma-separated i32 args and output observation trace" )
+  ; ( "-taint-track-semantic"
+    , Int (fun n -> Driver.taint_track_semantic := Some n)
+    , "run semantic taint tracking (Option B) with given i32 secret, output tobs and obs trace" )
   ; ("-csmith", Unit runCSmith, "Run CSmith and run Vellvm")
   ; ( "-i"
     , Set Driver.interpret

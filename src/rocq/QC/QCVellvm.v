@@ -299,6 +299,16 @@ Definition gen_PROG : GenLLVM PROG
 Definition gen_PROG_with_secret : GenLLVM PROG
   := fmap Prog gen_llvm_with_secret.
 
+(** Generator for programs where main takes one i32 secret, WITHOUT helper functions.
+    Needed for semantic taint tracking (Option B) which cannot handle inter-procedural calls. *)
+Definition gen_PROG_with_secret_nofun : GenLLVM PROG
+  := fmap Prog gen_llvm_with_secret_nofun.
+
+(** Generator for programs where main takes 1-4 i32 arguments.
+    Used for taint-guided NI testing with gen_pub_equiv. *)
+Definition gen_PROG_with_args : GenLLVM PROG
+  := fmap Prog gen_llvm_with_args.
+
 (* ================================================================= *)
 (** ** Non-Interference Testing                                       *)
 (* ================================================================= *)
@@ -421,6 +431,140 @@ Extract Constant vellvm_taint_leaked =>
      ) lines;
      !found_leak".
 
+(** Shell-out observation collection with multiple i32 args.
+    Runs: ./vellvm -interpret-obs-args <v1,v2,...> <file>
+    Returns observation trace as list Z. *)
+Axiom vellvm_collect_obs_args :
+  list (toplevel_entity typ (block typ * list (block typ))) -> list Z -> list Z.
+
+Extract Constant vellvm_collect_obs_args =>
+  "fun prog args ->
+     let prog = (Obj.magic prog : (LLVMAst.typ, LLVMAst.typ LLVMAst.block * LLVMAst.typ LLVMAst.block list) LLVMAst.toplevel_entity list) in
+     let llvm_file_name = Filename.(concat (get_temp_dir_name ()) ""temporary_vellvm_obs_args.ll"") in
+     let oc = open_out llvm_file_name in
+     let fmt = Format.formatter_of_out_channel oc in
+     Llvm_printer.toplevel_entities fmt prog;
+     Format.pp_print_flush fmt ();
+     close_out oc;
+     let args_str = String.concat "","" (List.map (fun z -> string_of_int (Big_int_Z.int_of_big_int z)) args) in
+     let cmd = ""timeout 5 ./vellvm -interpret-obs-args "" ^ args_str ^ "" "" ^ llvm_file_name ^ "" 2>&1"" in
+     let ic = Unix.open_process_in cmd in
+     let buf = Buffer.create 256 in
+     (try while true do Buffer.add_channel buf ic 1 done with End_of_file -> ());
+     let _ = Unix.close_process_in ic in
+     let output = Buffer.contents buf in
+     let lines = String.split_on_char '\n' output in
+     let int_to_z n = Big_int_Z.big_int_of_int n in
+     let in_trace = ref false in
+     let result = ref [] in
+     List.iter (fun line ->
+       if line = ""---OBS_TRACE_BEGIN---"" then in_trace := true
+       else if line = ""---OBS_TRACE_END---"" then in_trace := false
+       else if !in_trace then
+         (try result := (int_to_z (int_of_string line)) :: !result
+          with _ -> ())
+     ) lines;
+     List.rev !result".
+
+(** Shell-out semantic taint tracking (Option B).
+    Runs: ./vellvm -taint-track-semantic <secret> <file>
+    Returns (obs_trace, tobs_leaked : bool).
+    tobs_leaked = true if any variable names appear between TOBS_BEGIN/TOBS_END.
+    obs_trace = list Z from OBS_TRACE_BEGIN/OBS_TRACE_END. *)
+Axiom vellvm_taint_track_semantic :
+  list (toplevel_entity typ (block typ * list (block typ))) -> Z -> (list Z * bool).
+
+Extract Constant vellvm_taint_track_semantic =>
+  "fun prog secret ->
+     let prog = (Obj.magic prog : (LLVMAst.typ, LLVMAst.typ LLVMAst.block * LLVMAst.typ LLVMAst.block list) LLVMAst.toplevel_entity list) in
+     let llvm_file_name = Filename.(concat (get_temp_dir_name ()) ""temporary_vellvm_taint_sem.ll"") in
+     let oc = open_out llvm_file_name in
+     let fmt = Format.formatter_of_out_channel oc in
+     Llvm_printer.toplevel_entities fmt prog;
+     Format.pp_print_flush fmt ();
+     close_out oc;
+     let secret_int = Big_int_Z.int_of_big_int secret in
+     let cmd = ""timeout 10 ./vellvm -taint-track-semantic "" ^ string_of_int secret_int ^ "" "" ^ llvm_file_name ^ "" 2>&1"" in
+     let ic = Unix.open_process_in cmd in
+     let buf = Buffer.create 256 in
+     (try while true do Buffer.add_channel buf ic 1 done with End_of_file -> ());
+     let _ = Unix.close_process_in ic in
+     let output = Buffer.contents buf in
+     let lines = String.split_on_char '\n' output in
+     let int_to_z n = Big_int_Z.big_int_of_int n in
+     let in_trace = ref false in
+     let in_tobs = ref false in
+     let obs_result = ref [] in
+     let tobs_leaked = ref false in
+     List.iter (fun line ->
+       if line = ""---OBS_TRACE_BEGIN---"" then in_trace := true
+       else if line = ""---OBS_TRACE_END---"" then in_trace := false
+       else if line = ""---TOBS_BEGIN---"" then in_tobs := true
+       else if line = ""---TOBS_END---"" then in_tobs := false
+       else if !in_trace then
+         (try obs_result := (int_to_z (int_of_string line)) :: !obs_result
+          with _ -> ())
+       else if !in_tobs && String.length line > 0 then
+         tobs_leaked := true
+     ) lines;
+     (List.rev !obs_result, !tobs_leaked)".
+
+(** Count the number of arguments main takes in a program. *)
+Definition count_main_args
+  (prog : list (toplevel_entity typ (block typ * list (block typ)))) : nat :=
+  match List.find (fun tle =>
+    match tle with
+    | TLE_Definition d => raw_id_eqb (dc_name (df_prototype d)) (Name "main")
+    | _ => false
+    end) prog with
+  | Some (TLE_Definition d) => List.length (df_args d)
+  | _ => 0
+  end.
+
+(** Generate a list of n random Z values. *)
+Definition gen_z_list : nat -> G (list Z) :=
+  fix go n :=
+    match n with
+    | O => returnGen nil
+    | S n' => bindGen (choose (-100%Z, 100%Z)) (fun z =>
+              bindGen (go n') (fun rest =>
+              returnGen (cons z rest)))
+    end.
+
+(** Generate public-equivalent inputs: for each arg position,
+    if the taint tracker says that arg is leaked, use the SAME value;
+    otherwise use DIFFERENT values. *)
+Definition gen_pub_equiv_inputs
+  (prog : list (toplevel_entity typ (block typ * list (block typ))))
+  (vals1 : list Z) : G (list Z) :=
+  let leaked := vellvm_taint_leaked prog in
+  if leaked
+  then returnGen vals1  (* all args leaked → keep all same *)
+  else gen_z_list (List.length vals1).  (* none leaked → all can differ *)
+
+(** Taint-guided NI test with multiple arguments (SpecIBT-style).
+    1. Generate a program with 1-4 i32 args
+    2. Generate random arg values
+    3. Use taint tracker to determine public-equivalent inputs
+    4. Run both, compare traces *)
+Definition vellvm_taint_pub_equiv (p : string + PROG) : Checker :=
+  match p with
+  | inl msg => checker tt
+  | inr (Prog prog) =>
+      let n := count_main_args prog in
+      forAll (gen_z_list n) (fun vals1 : list Z =>
+      forAll (gen_pub_equiv_inputs prog vals1) (fun vals2 : list Z =>
+        let obs1 := z_to_obs (vellvm_collect_obs_args prog vals1) in
+        let obs2 := z_to_obs (vellvm_collect_obs_args prog vals2) in
+        if obs_trace_eqb obs1 obs2
+        then checker true
+        else whenFail ("PUB_EQUIV NI VIOLATION: taint-guided inputs produced different traces!"
+                    ++ " vals1=" ++ show vals1
+                    ++ " vals2=" ++ show vals2
+                    ++ " | trace1=" ++ show obs1
+                    ++ " | trace2=" ++ show obs2) false))
+  end.
+
 (** NI test: generate a program with a secret i32 argument,
     run with two different secrets, compare observation traces.
     If traces differ, the program leaks information about the secret
@@ -536,6 +680,49 @@ Definition vellvm_taint_precision (p : string + PROG) : Checker :=
                          ++ " | trace2=" ++ show obs2) false))
   end.
 
+(** Soundness test for semantic taint tracker (Option B).
+    Uses denote_function_taint with memory taint tracking.
+    Programs are generated WITHOUT helper functions (gen_PROG_with_secret_nofun)
+    because the semantic taint tracker cannot handle inter-procedural calls.
+
+    Strategy:
+    1. Generate a program with a secret i32 argument (no helper functions)
+    2. Run semantic taint tracker with secret=0 to get (obs_trace, tobs_leaked)
+    3. If tobs says leaked: both runs use SAME secret (public-equivalent)
+    4. If tobs says safe: runs use DIFFERENT secrets
+    5. Compare observation traces — they should always match
+
+    If traces differ for public-equivalent inputs, the semantic taint tracker
+    is UNSOUND (missed a dependency). *)
+Definition vellvm_taint_soundness_semantic (p : string + PROG) : Checker :=
+  match p with
+  | inl msg => checker tt
+  | inr (Prog prog) =>
+      forAll (choose (-100%Z, 100%Z)) (fun val1 : Z =>
+      forAll (choose (-100%Z, 100%Z)) (fun val2 : Z =>
+        (* Run semantic taint tracker with val1 to determine if secret leaks *)
+        let '(_, leaked) := vellvm_taint_track_semantic prog val1 in
+        (* Generate public-equivalent inputs *)
+        let secret1 := val1 in
+        let secret2 := if leaked
+                        then val1    (* tainted → keep same = public-equivalent *)
+                        else val2    (* untainted → can differ freely *)
+                        in
+        (* Collect observation traces for both secrets *)
+        let '(obs1_z, _) := vellvm_taint_track_semantic prog secret1 in
+        let '(obs2_z, _) := vellvm_taint_track_semantic prog secret2 in
+        let obs1 := z_to_obs obs1_z in
+        let obs2 := z_to_obs obs2_z in
+        if obs_trace_eqb obs1 obs2
+        then checker true
+        else whenFail ("SEMANTIC TAINT UNSOUND: public-equivalent inputs produced different traces!"
+                    ++ " leaked=" ++ show leaked
+                    ++ " secret1=" ++ show secret1
+                    ++ " secret2=" ++ show secret2
+                    ++ " | trace1=" ++ show obs1
+                    ++ " | trace2=" ++ show obs2) false))
+  end.
+
 Extract Constant defNumTests    => "1000".
 
 (* SAZ: These paths are relative to where the coqc command that runs the extraction is executed.
@@ -548,6 +735,9 @@ QCInclude "ml/libvellvm/*".
 (* QCInclude "../../ml/libvellvm/Camlcoq.ml". *)
 (* QCInclude "../../ml/extracted/*ml". *)
 Extract Inlined Constant Error.failwith => "(fun _ -> raise)".
-QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_taint_soundness).
+(* QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_taint_soundness). *)
 (* QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_taint_precision). *)
+(* QuickChick (forAll (run_GenLLVM gen_PROG_with_args) vellvm_taint_pub_equiv). *)
+(* QuickChick (forAll (run_GenLLVM gen_PROG_with_secret) vellvm_taint_precision). *)
+QuickChick (forAll (run_GenLLVM gen_PROG_with_secret_nofun) vellvm_taint_soundness_semantic).
 (*! QuickChick agrees. *)

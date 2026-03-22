@@ -240,6 +240,52 @@ let interpret_with_i32_obs
   in
   step_obs t
 
+(** Like interpret_with_i32_obs but accepts a list of i32 arguments.
+    Each integer in the list is passed as a UVALUE_I 32 to main. *)
+let interpret_with_args_obs
+      (args : int list)
+      (prog :
+         ( LLVMAst.typ
+         , LLVMAst.typ LLVMAst.block * LLVMAst.typ LLVMAst.block list )
+           LLVMAst.toplevel_entity
+           list )
+    : (BinNums.coq_Z list * DV.dvalue, exit_condition) result =
+  let sz32 = BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO BinNums.Coq_xH)))) in
+  let arg_uvals = List.map (fun v ->
+    DV.UVALUE_I (sz32, Integers.repr sz32 (Camlcoq.Z.of_sint v))
+  ) args in
+  let args_itree = lazy (ITreeDefinition.Coq_go (ITreeDefinition.RetF (Obj.magic arg_uvals))) in
+  let t = TopLevel.TopLevelBigIntptr.interpreter_gen_obs
+    (DynamicTypes.DTYPE_I sz32)
+    ('m'::('a'::('i'::('n'::[]))))
+    args_itree
+    prog in
+  let rec step_obs m =
+    let open ITreeDefinition in
+    match observe m with
+    | TauF x -> step_obs x
+    | RetF (_, (_, (obs, (_, (_, v))))) -> Ok (obs, v)
+    | VisF (Sum.Coq_inl1 (ExternalCall (_, _, _)), _) ->
+        Error (UninterpretedCall "Uninterpreted external call")
+    | VisF (Sum.Coq_inl1 (IO_stdout bytes), k) ->
+        let str = string_of_bytes bytes in
+        output_bytes stdout str ;
+        step_obs (k (Obj.magic ()))
+    | VisF (Sum.Coq_inl1 (IO_stderr bytes), k) ->
+        let str = string_of_bytes bytes in
+        output_bytes stderr str ;
+        step_obs (k (Obj.magic ()))
+    | VisF (Sum.Coq_inr1 (Sum.Coq_inl1 _), _) ->
+        Error (OutOfMemory "")
+    | VisF (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inl1 _)), _) ->
+        Error (UndefinedBehavior "")
+    | VisF (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inl1 _))), k) ->
+        step_obs (k (Obj.magic DV.DVALUE_None))
+    | VisF (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inr1 _))), _) ->
+        Error (Failed "")
+  in
+  step_obs t
+
 (** Run taint analysis on a program (pure AST, Layer 1).
     Returns the list of leaked variable names as raw_id list. *)
 let taint_analyze
@@ -250,3 +296,98 @@ let taint_analyze
            list )
     : LLVMAst.raw_id list =
   TaintTrackingSemantic.taint_program_gen (Obj.magic prog)
+
+(** Semantic taint tracking (Option B) with observation collection.
+    Uses denote_function_taint from TaintTrackingSemantic.v, which
+    tracks taint through the real denotation pipeline including
+    concrete memory addresses for Load/Store.
+
+    Pipeline:
+    1. build_global_environment (set up globals)
+    2. denote_function_taint (returns itree L0' (tstate * uvalue))
+    3. interp_mrec (convert L0' -> L0, trivial handler for no calls)
+    4. interp_mcfg4_exec_obs (observation collection at L2)
+
+    Returns (obs_list, tstate, dvalue) or error. *)
+let interpret_with_i32_taint_obs
+      (secret : int)
+      (prog :
+         ( LLVMAst.typ
+         , LLVMAst.typ LLVMAst.block * LLVMAst.typ LLVMAst.block list )
+           LLVMAst.toplevel_entity
+           list )
+    : (BinNums.coq_Z list * TaintTrackingSemantic.tstate * DV.dvalue, exit_condition) result =
+  let sz32 = BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO (BinNums.Coq_xO BinNums.Coq_xH)))) in
+  let secret_uval = DV.UVALUE_I (sz32, Integers.repr sz32 (Camlcoq.Z.of_sint secret)) in
+  (* Convert program to dtyp mcfg *)
+  let mcfg = TypToDtyp.convert_types
+    (CFG.mcfg_of_tle
+      (TopLevel.TopLevelBigIntptr.link
+        TopLevel.TopLevelBigIntptr.coq_PREDEFINED_FUNCTIONS prog)) in
+  (* Find main's definition in the mcfg *)
+  let main_name = 'm'::('a'::('i'::('n'::[]))) in
+  let find_main defs =
+    List.find_opt (fun df ->
+      match LLVMAst.(df.df_prototype.dc_name) with
+      | LLVMAst.Name s -> s = main_name
+      | _ -> false
+    ) defs
+  in
+  match find_main mcfg.CFG.m_definitions with
+  | None -> Error (Failed "main function not found for taint tracking")
+  | Some main_def ->
+    (* Build the itree L0 pipeline:
+       1. build_global_environment
+       2. denote_function_taint (returns itree L0')
+       3. interp_mrec converts L0' -> L0 *)
+    let secret_args = main_def.LLVMAst.df_args in
+    let t : _ ITreeDefinition.itree =
+      Obj.magic (
+        Monad.bind (Obj.magic ITreeDefinition.coq_Monad_itree)
+          (Obj.magic (TopLevel.TopLevelBigIntptr.build_global_environment mcfg))
+          (fun (_ : unit) ->
+            let t_L0' = TaintTrackingSemantic.SemanticTaintBigIntptr.denote_function_taint
+              main_def (Obj.magic [secret_uval]) secret_args in
+            (* interp_mrec: trivial handler that raises on any CallE.
+               The handler is never actually called for nofun programs. *)
+            Recursion.interp_mrec (fun _ _ ->
+              (* Return a dummy itree — this path should never be taken *)
+              Obj.magic (lazy (ITreeDefinition.Coq_go (ITreeDefinition.RetF (Obj.magic ()))))
+            ) (Obj.magic t_L0')
+          )
+      )
+    in
+    (* Feed through interp_mcfg4_exec_obs *)
+    let t_obs = InterpretationStack.InterpreterStackBigIntptr.interp_mcfg4_exec_obs
+      (Obj.magic t) [] ([], []) BinNums.N0
+      InterpretationStack.InterpreterStackBigIntptr.MEM.MMEP.MMSP.initial_memory_state
+    in
+    (* Step through the result itree *)
+    let rec step_taint_obs m =
+      let open ITreeDefinition in
+      match observe m with
+      | TauF x -> step_taint_obs x
+      (* Result: (MemState, (store_id, (obs, (local_env * stack, (global_env, (tstate, uvalue)))))) *)
+      | RetF (_, (_, (obs, (_, (_, (ts, uv)))))) ->
+          let dv = Obj.magic uv in
+          Ok (obs, ts, dv)
+      | VisF (Sum.Coq_inl1 (ExternalCall (_, _, _)), _) ->
+          Error (UninterpretedCall "Uninterpreted external call")
+      | VisF (Sum.Coq_inl1 (IO_stdout bytes), k) ->
+          let str = string_of_bytes bytes in
+          output_bytes stdout str ;
+          step_taint_obs (k (Obj.magic ()))
+      | VisF (Sum.Coq_inl1 (IO_stderr bytes), k) ->
+          let str = string_of_bytes bytes in
+          output_bytes stderr str ;
+          step_taint_obs (k (Obj.magic ()))
+      | VisF (Sum.Coq_inr1 (Sum.Coq_inl1 _), _) ->
+          Error (OutOfMemory "")
+      | VisF (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inl1 _)), _) ->
+          Error (UndefinedBehavior "")
+      | VisF (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inl1 _))), k) ->
+          step_taint_obs (k (Obj.magic DV.DVALUE_None))
+      | VisF (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inr1 (Sum.Coq_inr1 _))), _) ->
+          Error (Failed "")
+    in
+    step_taint_obs (Obj.magic t_obs)

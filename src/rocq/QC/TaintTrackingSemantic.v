@@ -637,3 +637,17 @@ End SemanticTaint.
 Module SemanticTaint64 := SemanticTaint
   MemoryModelImplementation.LLVMParams64BitIntptr
   Memory64BitIntptr.
+
+Module SemanticTaintBigIntptr := SemanticTaint
+  MemoryModelImplementation.LLVMParamsBigIntptr
+  MemoryBigIntptr.
+
+(** NOTE: The full taint pipeline (interpreter_gen_taint_obs) is built
+    in OCaml (interpreter.ml) by composing:
+    1. TopLevelBigIntptr.build_global_environment (setup global env)
+    2. SemanticTaintBigIntptr.denote_function_taint (taint-tracked denotation)
+    3. Recursion.interp_mrec (convert L0' -> L0)
+    4. InterpreterStackBigIntptr.interp_mcfg4_exec_obs (observation collection)
+
+    This is done in OCaml rather than Coq to avoid extraction type mismatch
+    between module instantiations (a known limitation of Coq extraction). *)

@@ -21,6 +21,8 @@ let interpret = ref false
 let interpret_obs = ref false
 let interpret_obs_secret : int option ref = ref None
 let taint_track = ref false
+let taint_track_semantic : int option ref = ref None
+let interpret_obs_args : string option ref = ref None
 
 let transform
     (prog :
@@ -110,6 +112,27 @@ let process_ll_file command_line_arguments path file =
             Obs_trace.obs_enabled := false
           end
     end;
+    (match !interpret_obs_args with
+    | Some args_str ->
+        (* Parse comma-separated integers *)
+        let arg_strs = String.split_on_char ',' args_str in
+        let args = List.map int_of_string arg_strs in
+        let result = Interpreter.interpret_with_args_obs args ll_ast in
+        (match result with
+        | Ok (obs, dv) ->
+            Printf.printf "Program terminated with: %s\n" (string_of_dvalue dv);
+            Printf.printf "---OBS_TRACE_BEGIN---\n";
+            let rec print_coq_z_list = function
+              | [] -> ()
+              | z :: rest ->
+                  Printf.printf "%d\n" (Camlcoq.Z.to_int z);
+                  print_coq_z_list rest
+            in
+            print_coq_z_list obs;
+            Printf.printf "---OBS_TRACE_END---\n"
+        | Error e ->
+            Printf.printf "Program error: %s\n" (Result.string_of_exit_condition e))
+    | None -> ());
     if !taint_track then begin
       let leaked = Interpreter.taint_analyze ll_ast in
       Printf.printf "---TAINT_BEGIN---\n";
@@ -128,7 +151,43 @@ let process_ll_file command_line_arguments path file =
       in
       print_raw_ids leaked;
       Printf.printf "---TAINT_END---\n"
-    end
+    end;
+    (match !taint_track_semantic with
+    | Some secret ->
+        let result = Interpreter.interpret_with_i32_taint_obs secret ll_ast in
+        (match result with
+        | Ok (obs, ts, dv) ->
+            Printf.printf "Program terminated with: %s\n" (string_of_dvalue dv);
+            (* Print taint observation: leaked variable names *)
+            Printf.printf "---TOBS_BEGIN---\n";
+            let rec print_raw_ids = function
+              | [] -> ()
+              | id :: rest ->
+                  (match id with
+                  | LLVMAst.Name s ->
+                      List.iter (fun c -> Printf.printf "%c" c) s;
+                      Printf.printf "\n"
+                  | LLVMAst.Anon n ->
+                      Printf.printf "anon_%d\n" (Camlcoq.Z.to_int n)
+                  | LLVMAst.Raw n ->
+                      Printf.printf "raw_%d\n" (Camlcoq.Z.to_int n));
+                  print_raw_ids rest
+            in
+            print_raw_ids ts.TaintTrackingSemantic.ts_tobs;
+            Printf.printf "---TOBS_END---\n";
+            (* Print observation trace *)
+            Printf.printf "---OBS_TRACE_BEGIN---\n";
+            let rec print_coq_z_list = function
+              | [] -> ()
+              | z :: rest ->
+                  Printf.printf "%d\n" (Camlcoq.Z.to_int z);
+                  print_coq_z_list rest
+            in
+            print_coq_z_list obs;
+            Printf.printf "---OBS_TRACE_END---\n"
+        | Error e ->
+            Printf.printf "Program error: %s\n" (Result.string_of_exit_condition e))
+    | None -> ())
   in
   let ll_ast' = transform ll_ast in
   let vll_file = Platform.gen_name !Platform.output_path file ".v.ll" in
