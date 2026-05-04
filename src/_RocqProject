@@ -52,6 +52,7 @@
 ./rocq/QC/TaintTracking.v
 ./rocq/QC/TaintTrackingSemantic.v
 ./rocq/QC/TaintTrackingPure.v
+./rocq/QC/TaintTrackingTest.v
 ./rocq/Semantics.v
 ./rocq/Semantics/ConcretizationParams.v
 ./rocq/Semantics/Denotation.v

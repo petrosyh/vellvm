@@ -87,9 +87,12 @@ Record tstate := mk_tstate {
 Definition init_tstate : tstate :=
   mk_tstate [] [] [] [].
 
-(** Initialize tstate with secret parameters marked as tainted. *)
-Definition init_tstate_with_secrets (secret_args : list raw_id) : tstate :=
-  let init_tregs := List.map (fun id => (id, [id])) secret_args in
+(** Initialize tstate with tracked sources.
+    Each source is labeled with its own identity so the taint tracker
+    can discover which ones flow into observations (= public)
+    and which ones don't (= secret). *)
+Definition init_tstate_with_sources (sources : list raw_id) : tstate :=
+  let init_tregs := List.map (fun id => (id, [id])) sources in
   mk_tstate [] init_tregs [] [].
 
 (* ================================================================= *)
@@ -364,13 +367,14 @@ Section TaintInstr.
         end
     end.
 
-  (** Taint-analyze a function definition. *)
+  (** Taint-analyze a function definition.
+      Returns tobs: the list of argument names that affect observations (= public inputs). *)
   Definition taint_function_gen (d : definition T (@block T * list (@block T)))
-                                (secret_args : list raw_id) : taint :=
+                                (sources : list raw_id) : taint :=
     let '(entry, rest) := df_instrs d in
     let blocks := entry :: rest in
     let entry_id := blk_id entry in
-    let ts0 := init_tstate_with_secrets secret_args in
+    let ts0 := init_tstate_with_sources sources in
     let fuel := 100 * List.length blocks in
     let final_ts := taint_cfg_gen fuel blocks [(entry_id, entry_id)] ts0 in
     ts_tobs final_ts.
@@ -387,7 +391,18 @@ Section TaintInstr.
     | _ => []
     end.
 
-  (** Does the program leak the secret? (pure AST analysis) *)
+  (** Return the list of argument names that affect observations (= public inputs).
+      Arguments NOT in this list are secret (can be varied without changing observations). *)
+  Definition taint_public_args_gen
+    (prog : list (toplevel_entity T (@block T * list (@block T)))) : list raw_id :=
+    taint_program_gen prog.
+
+  (** Check whether a specific argument is public (affects observations). *)
+  Definition is_public_arg_gen (id : raw_id)
+    (prog : list (toplevel_entity T (@block T * list (@block T)))) : bool :=
+    existsb (raw_id_eqb id) (taint_public_args_gen prog).
+
+  (** Backward-compatible: does any argument affect observations? *)
   Definition secret_is_leaked_gen
     (prog : list (toplevel_entity T (@block T * list (@block T)))) : bool :=
     match taint_program_gen prog with
@@ -401,26 +416,31 @@ End TaintInstr.
 (** ** Instantiations for typ and dtyp                                 *)
 (* ================================================================= *)
 
-(** For typ (used with generator output / existing TaintTracking.v compat) *)
+(** For typ (used with generator output) *)
 Definition calc_taint_exp_typ := @calc_taint_exp typ.
 Definition taint_instr_typ := @taint_instr_pure typ.
-Definition secret_is_leaked_typ := @secret_is_leaked_gen typ.
+Definition taint_public_args_typ := @taint_public_args_gen typ.
+Definition is_public_arg_typ := @is_public_arg_gen typ.
 
 (** For dtyp (used with denotation-level types) *)
 From Vellvm Require Import Syntax.DynamicTypes.
 Definition calc_taint_exp_dtyp := @calc_taint_exp dtyp.
 Definition taint_instr_dtyp := @taint_instr_pure dtyp.
-Definition secret_is_leaked_dtyp := @secret_is_leaked_gen dtyp.
+Definition taint_public_args_dtyp := @taint_public_args_gen dtyp.
+Definition is_public_arg_dtyp := @is_public_arg_gen dtyp.
 
-(** Backward-compatible alias *)
-Definition secret_is_leaked_semantic := secret_is_leaked_typ.
-
-(** Return the leaked variable names (not just bool). *)
+(** Return the list of public argument names (affects observations). *)
 Definition taint_program_typ := @taint_program_gen typ.
 
-(** Check if a specific raw_id is in the taint list. *)
+(** Check if a specific raw_id is in the taint list (= is public). *)
 Definition is_tainted (id : raw_id) (t : taint) : bool :=
   existsb (raw_id_eqb id) t.
+
+(** Backward-compatible aliases *)
+Definition secret_is_leaked_typ := @secret_is_leaked_gen typ.
+Definition secret_is_leaked_dtyp := @secret_is_leaked_gen dtyp.
+Definition secret_is_leaked_semantic := secret_is_leaked_typ.
+Definition init_tstate_with_secrets := init_tstate_with_sources.
 
 (* ================================================================= *)
 (** ** Option B: Semantic Taint Module with Memory Taint               *)
@@ -606,11 +626,12 @@ Module SemanticTaint (LP : LLVMParams) (MEM : Memory LP).
   (* ================================================================= *)
 
   (** Denote a function with taint tracking.
-      secret_args: list of parameter names that are secret (tainted by themselves).
-      All other parameters start untainted. *)
+      sources: list of parameter names to track as taint sources.
+      Typically all function arguments (df_args).
+      The taint tracker discovers which ones affect observations (= public). *)
   Definition denote_function_taint
     (df : definition dtyp (cfg dtyp)) (args : list uvalue)
-    (secret_args : list raw_id) : itree L0' (tstate * uvalue) :=
+    (sources : list raw_id) : itree L0' (tstate * uvalue) :=
     (* Match arguments to parameters *)
     '(bs, vs) <- lift_err ret (combine_lists_varargs (df_args df) args) ;;
     dts <- lift_err ret (map_monad dtyp_of_uvalue_fun vs) ;;
@@ -621,8 +642,8 @@ Module SemanticTaint (LP : LLVMParams) (MEM : Memory LP).
     trigger (Store dt varargs_dv (UVALUE_Packed_struct vs)) ;;
     match varargs_dv with
     | DVALUE_Addr varg =>
-        (* Initialize taint state: mark secret parameters *)
-        let ts0 := init_tstate_with_secrets secret_args in
+        (* Initialize taint state: label all sources with their own identity *)
+        let ts0 := init_tstate_with_sources sources in
         '(ts_final, rv) <- translate instr_to_L0' (denote_cfg_taint (df_instrs df) (Some varg) ts0) ;;
         trigger StackPop ;;
         trigger MemPop ;;

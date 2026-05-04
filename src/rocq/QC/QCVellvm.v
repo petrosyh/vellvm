@@ -11,6 +11,7 @@ Require Import Handlers.Handlers.
 
 From Stdlib Require Import String.
 From Stdlib Require Import ZArith.
+From Stdlib Require Import List.
 
 From ITree Require Import
      ITree
@@ -401,11 +402,12 @@ Extract Constant vellvm_collect_obs =>
 
 (** Shell-out taint analysis.
     Runs: ./vellvm -taint-track <file>
-    Returns true if the taint tracker says any secret flows into observations. *)
-Axiom vellvm_taint_leaked :
-  list (toplevel_entity typ (block typ * list (block typ))) -> bool.
+    Returns list of argument names that affect observations (= public inputs).
+    Arguments NOT in this list are secret (can be varied freely). *)
+Axiom vellvm_taint_public_args :
+  list (toplevel_entity typ (block typ * list (block typ))) -> list raw_id.
 
-Extract Constant vellvm_taint_leaked =>
+Extract Constant vellvm_taint_public_args =>
   "fun prog ->
      let prog = (Obj.magic prog : (LLVMAst.typ, LLVMAst.typ LLVMAst.block * LLVMAst.typ LLVMAst.block list) LLVMAst.toplevel_entity list) in
      let llvm_file_name = Filename.(concat (get_temp_dir_name ()) ""temporary_vellvm_taint.ll"") in
@@ -422,14 +424,22 @@ Extract Constant vellvm_taint_leaked =>
      let output = Buffer.contents buf in
      let lines = String.split_on_char '\n' output in
      let in_taint = ref false in
-     let found_leak = ref false in
+     let public_args = ref [] in
      List.iter (fun line ->
        if line = ""---TAINT_BEGIN---"" then in_taint := true
        else if line = ""---TAINT_END---"" then in_taint := false
        else if !in_taint && String.length line > 0 then
-         found_leak := true
+         public_args := (LLVMAst.Name line) :: !public_args
      ) lines;
-     !found_leak".
+     List.rev !public_args".
+
+(** Backward-compatible wrapper. *)
+Definition vellvm_taint_leaked
+  (prog : list (toplevel_entity typ (block typ * list (block typ)))) : bool :=
+  match vellvm_taint_public_args prog with
+  | nil => false
+  | _ => true
+  end.
 
 (** Shell-out observation collection with multiple i32 args.
     Runs: ./vellvm -interpret-obs-args <v1,v2,...> <file>
@@ -509,17 +519,22 @@ Extract Constant vellvm_taint_track_semantic =>
      ) lines;
      (List.rev !obs_result, !tobs_leaked)".
 
-(** Count the number of arguments main takes in a program. *)
-Definition count_main_args
-  (prog : list (toplevel_entity typ (block typ * list (block typ)))) : nat :=
+(** Get the argument names of main. *)
+Definition main_arg_names
+  (prog : list (toplevel_entity typ (block typ * list (block typ)))) : list raw_id :=
   match List.find (fun tle =>
     match tle with
     | TLE_Definition d => raw_id_eqb (dc_name (df_prototype d)) (Name "main")
     | _ => false
     end) prog with
-  | Some (TLE_Definition d) => List.length (df_args d)
-  | _ => 0
+  | Some (TLE_Definition d) => df_args d
+  | _ => nil
   end.
+
+(** Count the number of arguments main takes in a program. *)
+Definition count_main_args
+  (prog : list (toplevel_entity typ (block typ * list (block typ)))) : nat :=
+  List.length (main_arg_names prog).
 
 (** Generate a list of n random Z values. *)
 Definition gen_z_list : nat -> G (list Z) :=
@@ -531,16 +546,34 @@ Definition gen_z_list : nat -> G (list Z) :=
               returnGen (cons z rest)))
     end.
 
-(** Generate public-equivalent inputs: for each arg position,
-    if the taint tracker says that arg is leaked, use the SAME value;
-    otherwise use DIFFERENT values. *)
+(** Generate public-equivalent inputs: per-argument classification.
+    - public args (in tobs): keep the SAME value between two runs
+    - secret args (not in tobs): vary freely
+    The taint tracker discovers which args are public (affect observations). *)
+Fixpoint gen_pub_equiv_inputs_aux
+  (arg_names : list raw_id)
+  (public_args : list raw_id)
+  (vals1 : list Z) : G (list Z) :=
+  match arg_names, vals1 with
+  | nil, _ => returnGen nil
+  | _, nil => returnGen nil
+  | name :: names', v :: vs' =>
+      let is_public := existsb (raw_id_eqb name) public_args in
+      bindGen (if is_public
+               then returnGen v             (* public: keep same *)
+               else choose (-100%Z, 100%Z)) (* secret: vary freely *)
+        (fun v2 =>
+      bindGen (gen_pub_equiv_inputs_aux names' public_args vs')
+        (fun rest =>
+      returnGen (v2 :: rest)))
+  end.
+
 Definition gen_pub_equiv_inputs
   (prog : list (toplevel_entity typ (block typ * list (block typ))))
   (vals1 : list Z) : G (list Z) :=
-  let leaked := vellvm_taint_leaked prog in
-  if leaked
-  then returnGen vals1  (* all args leaked → keep all same *)
-  else gen_z_list (List.length vals1).  (* none leaked → all can differ *)
+  let arg_names := main_arg_names prog in
+  let public_args := vellvm_taint_public_args prog in
+  gen_pub_equiv_inputs_aux arg_names public_args vals1.
 
 (** Taint-guided NI test with multiple arguments (SpecIBT-style).
     1. Generate a program with 1-4 i32 args
