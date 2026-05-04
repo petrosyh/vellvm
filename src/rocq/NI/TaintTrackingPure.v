@@ -25,7 +25,7 @@ From Vellvm Require Import
   Syntax.LLVMAst
   Syntax.AstLib.
 
-From Vellvm.QC Require Import TaintTrackingSemantic.
+From Vellvm.NI Require Import TaintTrackingSemantic.
 
 (* ================================================================= *)
 (** ** Legacy Layer 1: Pure AST Taint Analysis                        *)
