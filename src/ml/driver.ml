@@ -94,23 +94,17 @@ let process_ll_file command_line_arguments path file =
           | Error e ->
               Printf.printf "Program error: %s\n" (Result.string_of_exit_condition e))
       | None ->
-          let collecting_obs = !interpret_obs in
-          if collecting_obs then begin
-            Obs_trace.obs_enabled := true;
-            Obs_trace.clear ()
-          end;
+          (* -interpret-obs (without -secret) used to invoke an Obs_trace
+             OCaml module for ad-hoc observation logging. That module was
+             never committed in this branch. Use -interpret-obs-secret or
+             -interpret-obs-args for observation traces; this path now just
+             runs plain interpretation. *)
           let result = Interpreter.interpret command_line_arguments ll_ast in
           (match result with
           | Ok dv ->
               Printf.printf "Program terminated with: %s\n" (string_of_dvalue dv)
           | Error e ->
-              Printf.printf "Program error: %s\n" (Result.string_of_exit_condition e));
-          if collecting_obs then begin
-            Printf.printf "---OBS_TRACE_BEGIN---\n";
-            Obs_trace.print_trace ();
-            Printf.printf "---OBS_TRACE_END---\n";
-            Obs_trace.obs_enabled := false
-          end
+              Printf.printf "Program error: %s\n" (Result.string_of_exit_condition e))
     end;
     (match !interpret_obs_args with
     | Some args_str ->

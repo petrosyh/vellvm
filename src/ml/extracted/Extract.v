@@ -29,7 +29,7 @@ From Vellvm Require
      Utils.ParserHelper
      QC.ShowAST
      QC.ReprAST
-     QC.TaintTrackingSemantic
+     NI.TaintTrackingSemantic
      (* QC.QCVellvm *).
 
 Set Extraction AccessOpaque.
@@ -45,7 +45,6 @@ Require ExtrOcamlIntConv.
 Extraction Language OCaml.
 Extraction Blacklist String List Char Core Z Format.
 
-Require Import mathcomp.ssreflect.ssreflect.
 From mathcomp Require Import ssreflect ssrnat ssrbool div eqtype.
 
 (* strings ------------------------------------------------------------------ *)
