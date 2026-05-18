@@ -5,6 +5,8 @@ From ITree Require Import
      Events.StateFacts
      Eq.Eqit.
 
+From Stdlib Require Import ZArith.
+
 From Vellvm Require Import
      Utilities
      Semantics.LLVMEvents
@@ -44,6 +46,50 @@ Module Type InterpreterStack_common (LP : LLVMParams) (MEM : Memory LP).
   Import LLVM.Local.
   Import LLVM.Stack.
   Import LLVM.D.
+
+  (** Extract a [Z] from an L2 event whenever it is one of the events that
+      observational equality cares about:
+      - [Load _ (DVALUE_Addr a)]      → positive: [ptr_to_int a]
+      - [Store _ (DVALUE_Addr a) _]   → negative: [- ptr_to_int a]
+      - [DebugBranch true]            → 1000000
+      - [DebugBranch false]           → 1000001
+      Returns [None] for events that are not observable in this sense.
+
+      Old-base L2 on [9557f168]:
+        ExternalCallE +' IntrinsicE +' MemoryE +' PickUvalueE
+          +' OOME +' UBE +' DebugE +' FailureE
+      MemoryE is at position 3, DebugE at position 7. *)
+  Definition event_obs {X} (e : L2 X) : option Z :=
+    match e with
+    | inr1 (inr1 (inl1 (Load _ (DVALUE_Addr a)))) =>
+        Some (LP.PTOI.ptr_to_int a)
+    | inr1 (inr1 (inl1 (Store _ (DVALUE_Addr a) _))) =>
+        Some (Z.opp (LP.PTOI.ptr_to_int a))
+    | inr1 (inr1 (inr1 (inr1 (inr1 (inr1 (inl1 (DebugBranch true))))))) =>
+        Some 1000000%Z
+    | inr1 (inr1 (inr1 (inr1 (inr1 (inr1 (inl1 (DebugBranch false))))))) =>
+        Some 1000001%Z
+    | _ => None
+    end.
+
+  (** Walk an itree at L2 and record observation events into a list of [Z].
+      Re-emits every event unchanged — purely instrumentation. Defined
+      outside [Section InterpreterMCFG] because [Unset Guard Checking] is
+      not allowed inside a section. *)
+  Unset Guard Checking.
+  CoFixpoint observe_L2 {R} (obs : list Z) (t : itree L2 R)
+    : itree L2 (list Z * R) :=
+    match ITreeDefinition.observe t with
+    | ITreeDefinition.RetF r => Ret (List.rev obs, r)
+    | ITreeDefinition.TauF t' => Tau (observe_L2 obs t')
+    | @ITreeDefinition.VisF _ _ _ X e k =>
+        let obs' := match event_obs e with
+                    | Some z => cons z obs
+                    | None => obs
+                    end in
+        Vis e (fun x : X => observe_L2 obs' (k x))
+    end.
+  Set Guard Checking.
 
   Section InterpreterMCFG.
     Context {MemM : Type -> Type}.
@@ -96,6 +142,17 @@ Module Type InterpreterStack_common (LP : LLVMParams) (MEM : Memory LP).
       let L1_trace       := interp_global uvalue_trace g in
       let L2_trace       := interp_local_stack L1_trace l in
       let L3_trace       := interp_memory L2_trace sid m in
+      let L4_trace       := exec_undef L3_trace in
+      L4_trace.
+
+    (** Like [interp_mcfg4_exec] but inserts [observe_L2] at L2 to collect
+        Load/Store addresses and branch directions into the result. *)
+    Definition interp_mcfg4_exec_obs {R} (t: itree L0 R) g l sid m :=
+      let uvalue_trace   := interp_intrinsics t in
+      let L1_trace       := interp_global uvalue_trace g in
+      let L2_trace       := interp_local_stack L1_trace l in
+      let L2_obs         := observe_L2 nil L2_trace in
+      let L3_trace       := interp_memory L2_obs sid m in
       let L4_trace       := exec_undef L3_trace in
       L4_trace.
 

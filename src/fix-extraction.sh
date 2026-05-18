@@ -7,7 +7,7 @@ MEMORYFILES=("MemoryModelImplementation.mli")
 BYTEPATCHFILES=("Pick.mli" "Pick.ml" "Denotation.mli" "Denotation.ml")
 GENMLIFILES=("GenAlive2.mli")
 GENFILES=("GenAlive2.ml" "RandomQC.ml")
-EXECPOSTFILES=("InterpretationStack.ml" "InterpretationStack.mli" "Lang.ml" "Lang.mli" "MemoryModel.ml" "MemoryModel.mli" "MemoryInterpreters.ml" "MemoryInterpreters.mli" "FiniteExecPrimitives.ml" "FiniteExecPrimitives.mli" "MemoryModelImplementation.ml" "MemoryModelImplementation.mli")
+EXECPOSTFILES=("InterpretationStack.ml" "InterpretationStack.mli" "Lang.ml" "Lang.mli" "MemoryModel.ml" "MemoryModel.mli" "MemoryInterpreters.ml" "MemoryInterpreters.mli" "FiniteExecPrimitives.ml" "FiniteExecPrimitives.mli" "MemoryModelImplementation.ml" "MemoryModelImplementation.mli" "TaintTracker.ml" "TaintTracker.mli")
 
 function replace () {
     perl -i.bak -p0777ne "$1" $EXTRACT_DIR/$2

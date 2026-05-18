@@ -115,11 +115,18 @@ Set Contextual Implicit.
   (* Debug is identical to the "Trace" effect from the itrees library,
    but debug is probably a less confusing name for us. *)
   Variant DebugE : Type -> Type :=
-  | Debug : unit -> DebugE unit.
+  | Debug : unit -> DebugE unit
+  | DebugBranch : bool -> DebugE unit.
 
   (* Utilities to conveniently trigger debug events *)
   Definition debug {E} `{DebugE -< E} (msg : string) : itree E unit :=
     trigger (Debug (print_msg msg)).
+
+  (* Emit a branch direction. Used by [TERM_Br] in Denotation.v so that
+     conditional-branch directions become observable events at L2 via
+     [observe_L2] in InterpretationStack.v. *)
+  Definition debug_branch {E} `{DebugE -< E} (b : bool) : itree E unit :=
+    trigger (DebugBranch b).
 
   (* Failure. Carries a string for a message. *)
   Variant FailureE : Type -> Type :=

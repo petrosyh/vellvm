@@ -539,8 +539,10 @@ Module Denotation (LP : LLVMParams) (MP : MemoryParams LP) (Byte : ByteModule LP
       match dv with
       | @DVALUE_I 1 comparison_bit =>
         if equ comparison_bit one then
+          debug_branch true;;
           ret (inl br1)
         else
+          debug_branch false;;
           ret (inl br2)
       | DVALUE_Poison dt => raiseUB "Branching on poison."
       | _ => raise "Br got non-bool value"

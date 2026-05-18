@@ -375,6 +375,17 @@ let args =
   ; ( "-interpret"
     , Set Driver.interpret
     , "interpret ll program starting from 'main'" )
+  ; ( "-interpret-obs-args"
+    , String (fun s -> Driver.interpret_obs_args := Some s)
+    , "interpret with comma-separated i32 args (e.g. -interpret-obs-args 5,3) \
+       and emit a Load/Store/branch observation trace between \
+       ---OBS_TRACE_BEGIN--- and ---OBS_TRACE_END--- markers" )
+  ; ( "-taint-track-args"
+    , String (fun s -> Driver.taint_track_args := Some s)
+    , "run the partition-style taint tracker with comma-separated i32 args. \
+       Emits the public partition (register names + memory addresses) \
+       between ---TOBS_REGS_BEGIN/END--- and ---TOBS_ADDRS_BEGIN/END---, \
+       followed by the observation trace" )
   ; ("-csmith", Unit runCSmith, "Run CSmith and run Vellvm")
   ; ( "-i"
     , Set Driver.interpret

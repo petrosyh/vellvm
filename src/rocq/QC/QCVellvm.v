@@ -67,8 +67,14 @@ CoFixpoint step (t : ITreeDefinition.itree L4 res_L4) : MlResult dvalue string
          MlError _ string ("OOM")%string
      | VisF (inr1 (inr1 (inl1 (ThrowUB msg)))) k =>
          MlError _ string ("UB")%string
-     | VisF (inr1 (inr1 (inr1 (inl1 (Debug msg))))) k =>
-         MlError _ string ("Debug")%string
+     | VisF (inr1 (inr1 (inr1 (inl1 e)))) k =>
+         (* DebugE has two constructors (Debug and the NI-added
+            DebugBranch); both have unit return type. Use a dependent
+            inner match so the continuation [k] is well-typed at [unit]. *)
+         match e in DebugE r return (r -> _) -> MlResult dvalue string with
+         | Debug _ => fun _ => MlError _ string ("Debug")%string
+         | DebugBranch _ => fun cont => step (cont tt)
+         end k
      | VisF (inr1 (inr1 (inr1 (inr1 (LLVMEvents.Throw msg))))) k =>
          MlError _ string ("Failure")%string
      end.
