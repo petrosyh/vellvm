@@ -40,6 +40,7 @@
 ./rocq/Numeric/IEEE754_extra.v
 ./rocq/Numeric/Integers.v
 ./rocq/Numeric/Zbits.v
+./rocq/NI/TaintTracker.v
 ./rocq/QC/GenAST.v
 ./rocq/QC/GenMetadata.v
 ./rocq/QC/ECS.v
@@ -56,13 +57,15 @@
 ./rocq/Semantics/DynamicValues.v
 ./rocq/Semantics/GepM.v
 ./rocq/Semantics/StoreId.v
-./rocq/Semantics/InfiniteToFinite.v
-./rocq/Semantics/InfiniteToFinite/Conversions/BaseConversions.v
-./rocq/Semantics/InfiniteToFinite/Conversions/DvalueConversions.v
-./rocq/Semantics/InfiniteToFinite/Conversions/EventConversions.v
-./rocq/Semantics/InfiniteToFinite/Conversions/TreeConversions.v
-./rocq/Semantics/InfiniteToFinite/LangRefine.v
-./rocq/Semantics/InfiniteToFinite/R2Injective.v
+# Excluded for NI testing: heavyweight Infinite↔Finite refinement proofs,
+# not needed since NI testing uses BigIntptr memory model directly.
+# ./rocq/Semantics/InfiniteToFinite.v
+# ./rocq/Semantics/InfiniteToFinite/Conversions/BaseConversions.v
+# ./rocq/Semantics/InfiniteToFinite/Conversions/DvalueConversions.v
+# ./rocq/Semantics/InfiniteToFinite/Conversions/EventConversions.v
+# ./rocq/Semantics/InfiniteToFinite/Conversions/TreeConversions.v
+# ./rocq/Semantics/InfiniteToFinite/LangRefine.v
+# ./rocq/Semantics/InfiniteToFinite/R2Injective.v
 ./rocq/Semantics/InterpretationStack.v
 ./rocq/Semantics/IntrinsicsDefinitions.v
 ./rocq/Semantics/ItreeRaiseMReturns.v

@@ -373,7 +373,7 @@ Module Type DenotationTheory (IS : InterpreterStack) (TOP : LLVMTopLevel IS).
         apply has_post_bind; intros ?.
         break_match_goal; try (apply raise_has_all_posts || apply raiseUB_has_all_posts); subst.
         break_match_goal; try (apply raise_has_all_posts || apply raiseUB_has_all_posts); subst.
-        break_match_goal; apply eutt_Ret; cbn; eauto.
+        break_match_goal; apply has_post_bind; intros []; apply eutt_Ret; cbn; eauto.
       - (* Switch *)
         destruct v; cbn.
         apply has_post_bind; intros ?.

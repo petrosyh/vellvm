@@ -20,6 +20,11 @@ let string_of_dvalue (d : DV.dvalue) = of_str (DV.show_dvalue d)
 let interpret = ref false
 let debugger = ref false
 
+(* NI testing flags: comma-separated lists of i32 arguments to pass to main.
+   None means the flag wasn't given on this invocation. *)
+let interpret_obs_args : string option ref = ref None
+let taint_track_args : string option ref = ref None
+
 let transform
     (prog :
       ( LLVMAst.typ
@@ -66,6 +71,37 @@ let link_files : TopLevel.TopLevelBigIntptr.ll_toplevel_entities list ref = ref 
 
 let add_link_file path = link_files := IO.parse_file path :: !link_files
 
+(* Parse a comma-separated list of decimal integers (e.g. "5,3,-7"). *)
+let parse_int_args (s : string) : int list =
+  List.map int_of_string (String.split_on_char ',' s)
+
+(* Print a list of Coq Z observation events between framed markers. *)
+let print_obs_trace (obs : BinNums.coq_Z list) =
+  Printf.printf "---OBS_TRACE_BEGIN---\n";
+  List.iter (fun z -> Printf.printf "%d\n" (Camlcoq.Z.to_int z)) obs;
+  Printf.printf "---OBS_TRACE_END---\n"
+
+(* Print a single raw_id in human-readable form. *)
+let print_raw_id (id : LLVMAst.raw_id) =
+  match id with
+  | LLVMAst.Name s ->
+      List.iter (fun c -> Printf.printf "%c" c) s;
+      Printf.printf "\n"
+  | LLVMAst.Anon n -> Printf.printf "anon_%d\n" (Camlcoq.Z.to_int n)
+  | LLVMAst.Raw  n -> Printf.printf "raw_%d\n"  (Camlcoq.Z.to_int n)
+
+(* Print the public partition output of the taint tracker: register
+   names that influenced an observation, and memory addresses that
+   influenced an observation, each in its own framed section. *)
+let print_tobs_partition (ts : TaintTracker.tstate) =
+  let ids, addrs = TaintTracker.split_taint ts.TaintTracker.ts_tobs in
+  Printf.printf "---TOBS_REGS_BEGIN---\n";
+  List.iter print_raw_id ids;
+  Printf.printf "---TOBS_REGS_END---\n";
+  Printf.printf "---TOBS_ADDRS_BEGIN---\n";
+  List.iter (fun z -> Printf.printf "%d\n" (Camlcoq.Z.to_int z)) addrs;
+  Printf.printf "---TOBS_ADDRS_END---\n"
+
 let process_ll_file command_line_arguments path file =
   let _ = Platform.verb @@ Printf.sprintf "* processing file: %s\n" path in
   let ll_ast = IO.parse_file path in
@@ -82,6 +118,29 @@ let process_ll_file command_line_arguments path file =
           Printf.printf "Program terminated with: %s\n" (string_of_dvalue dv)
       | Error e -> failwith (Result.string_of_exit_condition e))
   in
+  (* -interpret-obs-args <n1,n2,…> *)
+  (match !interpret_obs_args with
+   | Some args_str ->
+       let args = parse_int_args args_str in
+       (match Interpreter.interpret_with_args_obs args ll_ast with
+        | Ok (obs, dv) ->
+            Printf.printf "Program terminated with: %s\n" (string_of_dvalue dv);
+            print_obs_trace obs
+        | Error e ->
+            Printf.printf "Program error: %s\n" (Result.string_of_exit_condition e))
+   | None -> ());
+  (* -taint-track-args <n1,n2,…> *)
+  (match !taint_track_args with
+   | Some args_str ->
+       let args = parse_int_args args_str in
+       (match Interpreter.interpret_with_args_taint_obs args ll_ast with
+        | Ok (obs, ts, dv) ->
+            Printf.printf "Program terminated with: %s\n" (string_of_dvalue dv);
+            print_tobs_partition ts;
+            print_obs_trace obs
+        | Error e ->
+            Printf.printf "Program error: %s\n" (Result.string_of_exit_condition e))
+   | None -> ());
   let ll_ast' = transform ll_ast in
   let vll_file = Platform.gen_name !Platform.output_path file ".v.ll" in
   let _ = IO.output_file vll_file ll_ast' in

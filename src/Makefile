@@ -40,7 +40,7 @@ VFILES := $(shell find rocq -name "*.v")
 
 ######## targets not in this "KNOWNTARGETS" list will be forwarded to RocqMakefile via invoke-rocqmakefile
 ######## WARNING - every target of *this* Makefile must be listed here
-KNOWNTARGETS := RocqMakefile invoke-rocqmakefile rocq extracted $(EXTRACTDIR)/STAMP $(EXTRACTDIR)/Extract.v $(VELLVM_EXE) vellvm vellvmbc test check qc-tests yarpgen-tests rm-qc-test-vo clean extractedclean clean-rocqmakefile doc/rocq2html documentation $(EXTRACTDIR)/FRONTEND_STAMP $(FRONTEND_EXE) frontend frontend_exe pin-rocq opam print-opam print-includes qc-files
+KNOWNTARGETS := RocqMakefile invoke-rocqmakefile rocq extracted $(EXTRACTDIR)/STAMP $(EXTRACTDIR)/Extract.v $(VELLVM_EXE) vellvm vellvmbc test check qc-tests ni-tests yarpgen-tests rm-qc-test-vo rm-ni-test-vo clean extractedclean clean-rocqmakefile doc/rocq2html documentation $(EXTRACTDIR)/FRONTEND_STAMP $(FRONTEND_EXE) frontend frontend_exe pin-rocq opam print-opam print-includes qc-files
 
 KNOWNFILES := Makefile _RocqProject
 
@@ -108,6 +108,10 @@ yarpgen-tests: rm-qc-test-vo rocq
 qc-tests: rm-qc-test-vo qc-files vellvm
 	$(ROCQEXEC) rocq/QC/QCVellvm.v
 
+.PHONY: ni-tests
+ni-tests: rm-ni-test-vo qc-files vellvm
+	VELLVM_BIN="$$(pwd)/vellvm" $(ROCQEXEC) rocq/QC/NITests.v
+
 .PHONY: qc-files
 qc-files: $(QC_VFILES)
 	make $(QC_VOFILES)
@@ -115,6 +119,10 @@ qc-files: $(QC_VFILES)
 .PHONY: rm-qc-test-vo
 rm-qc-test-vo:
 	rm -f rocq/QC/QCVellvm.vo
+
+.PHONY: rm-ni-test-vo
+rm-ni-test-vo:
+	rm -f rocq/QC/NITests.vo
 
 ######## cleaning the project
 

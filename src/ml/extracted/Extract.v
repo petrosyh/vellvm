@@ -29,6 +29,7 @@ From Vellvm Require
      Utils.ParserHelper
      QC.ShowAST
      QC.ReprAST
+     NI.TaintTracker
      (* QC.QCVellvm *).
 
 Set Extraction AccessOpaque.
@@ -153,4 +154,4 @@ Extract Constant randomRN =>
 Extract Constant randomRNat =>
   "(fun (x,y) r -> let yint = ExtrOcamlIntConv.int_of_nat y in let xint = ExtrOcamlIntConv.int_of_nat x in if yint < xint then failwith ""choose called with unordered arguments"" else  (ExtrOcamlIntConv.nat_of_int (xint + (Random.State.int r (yint - xint + 1))), r))".
 
-Separate Extraction TopLevelBigIntptr ExtrOcamlIntConv TopLevel AstLib Transform ParserHelper ShowAST ReprAST Handlers GenAlive2 Numeric.Floats BinNums BinPos (* QCVellvm *).
+Separate Extraction TopLevelBigIntptr ExtrOcamlIntConv TopLevel AstLib Transform ParserHelper ShowAST ReprAST Handlers GenAlive2 Numeric.Floats BinNums BinPos TaintTracker (* QCVellvm *).
