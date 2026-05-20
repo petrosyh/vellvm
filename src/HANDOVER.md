@@ -362,10 +362,12 @@ in `TaintTracker.v` is mechanical (~10 lines per construct).
 
 ## Things to know about the user's environment
 
-- **WSL2 on Windows** (not native Linux). One stack-overflow-style
-  crash earlier turned out to be unrelated to WSL; `ulimit -s
-  unlimited` didn't help. Don't chase ghost WSL issues unless you have
-  a strong signal.
+- **Native Ubuntu Linux** (as of 2026-05-19). Earlier sessions were on
+  WSL2 on Windows — historical notes in this doc may still reference
+  WSL behavior. One stack-overflow-style crash on the old WSL setup
+  turned out to be unrelated to WSL anyway (`ulimit -s unlimited`
+  didn't help); on native Linux there's no reason to suspect
+  WSL-specific issues.
 - Opam switch name: `vellvm`.
 - The user has `~/works/vellvm/SpecIBT-old/` as a reference (the
   earlier project they wrote that inspired the partition design).

@@ -120,7 +120,7 @@ is a free extension. Emission happens in
 ### OCaml entry
 
 `interpret_with_args_obs` in
-[src/ml/interpreter.ml](src/ml/interpreter.ml) — packs the int list
+[ml/interpreter.ml](ml/interpreter.ml) — packs the int list
 into a `uvalue list`, calls `TopLevelBigIntptr.interpreter_gen_obs`,
 and steps the resulting itree, extracting `(obs, dvalue)` from the
 nested result tuple.
@@ -206,7 +206,7 @@ pure AST-only update via `taint_instr_pure` (Op, Alloca, Call, …).
 ### Pipeline composition (in OCaml)
 
 `interpret_with_args_taint_obs` in
-[src/ml/interpreter.ml](src/ml/interpreter.ml) wires together:
+[ml/interpreter.ml](ml/interpreter.ml) wires together:
 
 1. `TopLevelBigIntptr.build_global_environment`
 2. `TaintTrackerBigIntptr.denote_function_taint` (returns `itree L0' (tstate * uvalue)`)
@@ -299,9 +299,9 @@ fixtures in [../ni_examples/](../ni_examples/) — see
 | [rocq/Semantics/LLVMEvents.v](rocq/Semantics/LLVMEvents.v) | `DebugE` + `DebugBranch` |
 | [rocq/Semantics/Denotation.v](rocq/Semantics/Denotation.v) | `TERM_Br` emission |
 | [rocq/NI/TaintTracker.v](rocq/NI/TaintTracker.v) | Partition-style taint tracker (~440 LOC) |
-| [src/ml/interpreter.ml](src/ml/interpreter.ml) | OCaml entry points (`interpret_with_args_obs`, `interpret_with_args_taint_obs`) |
-| [src/ml/driver.ml](src/ml/driver.ml) | CLI flag dispatch + framed output |
-| [src/ml/main.ml](src/ml/main.ml) | Flag registration |
+| [ml/interpreter.ml](ml/interpreter.ml) | OCaml entry points (`interpret_with_args_obs`, `interpret_with_args_taint_obs`) |
+| [ml/driver.ml](ml/driver.ml) | CLI flag dispatch + framed output |
+| [ml/main.ml](ml/main.ml) | Flag registration |
 
 For per-flag CLI usage and worked examples, see
 [NI_TESTING.md](NI_TESTING.md).
