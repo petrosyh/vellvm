@@ -232,11 +232,16 @@ Definition vellvm_taint_public_regs
 (** ** Helpers                                                        *)
 (* ================================================================= *)
 
-(** Find the name of [main]'s sole [i32] argument, if any. The active
-    generator [gen_PROG_with_secret_nofun] produces such a program. *)
-Definition find_secret_arg
+(** The register names of [main]'s arguments, in order. This is the full
+    set of inputs the harness can vary from outside: the args vector passed
+    to [-interpret-obs-args] / [-taint-track-args] maps positionally onto
+    these. The current generator emits exactly one [i32], but we return the
+    whole [df_args] so the soundness test already handles a multi-argument
+    [main] (each argument independently held-or-varied per its taint).
+    Empty if there is no [main] or it takes no arguments. *)
+Definition find_main_arg_ids
   (prog : list (toplevel_entity typ (block typ * list (block typ))))
-  : option raw_id :=
+  : list raw_id :=
   let mains :=
     List.fold_left (fun acc tle =>
       match tle with
@@ -250,12 +255,8 @@ Definition find_secret_arg
       end) prog []
   in
   match mains with
-  | d :: _ =>
-      match d.(df_args) with
-      | id :: _ => Some id
-      | _ => None
-      end
-  | _ => None
+  | d :: _ => d.(df_args)
+  | _ => []
   end.
 
 Definition raw_id_eqb (x y : raw_id) : bool :=
@@ -268,40 +269,82 @@ Definition raw_id_in_list (id : raw_id) (l : list raw_id) : bool :=
 (** ** Soundness property                                             *)
 (* ================================================================= *)
 
-(** For a generated [P] with [main(i32 %secret)]:
-    - Pick two distinct secret values S1, S2.
-    - Run the taint tracker with S1 → public register set [pub_regs].
-    - If [secret] is in [pub_regs], the program is allowed to behave
-      differently across secrets — skip (or check S1 = S1 trivially).
-    - If [secret] is *not* in [pub_regs], the tracker claims it's safe.
-      Then the observation traces under S1 and S2 must be equal. *)
+(** Range for randomly-drawn [i32] argument values. Tunable — wider ranges
+    exercise more branch conditions, narrower ones collide on paths. *)
+Definition gen_i32 : G Z := choose ((-1000)%Z, 1000%Z).
+
+(** A random baseline argument vector of length [n]. *)
+Definition gen_arg_vector (n : nat) : G (list Z) := vectorOf n gen_i32.
+
+(** Generate an argument vector that is *public-equivalent* to [base]: at
+    each position whose argument register is in [pub] (the tracker's public
+    partition) keep [base]'s value, otherwise draw a fresh random value.
+    This is the [main]-argument analogue of Triosecuris's
+    [gen_pub_equiv_same_ty] (TestingLib.v): hold the tainted/public inputs
+    equal, randomise the complement. *)
+Definition gen_pub_equiv_args
+  (arg_ids : list raw_id) (pub : list raw_id) (base : list Z) : G (list Z) :=
+  sequenceGen
+    (List.map (fun '(id, b) =>
+        if raw_id_in_list id pub then returnGen b else gen_i32)
+      (List.combine arg_ids base)).
+
+(** Leakage-match helper — the reusable core NI check on an input PAIR: run
+    [prog] on two argument vectors and require their observation traces (the
+    attacker-visible leakage) to agree. The property below feeds it a
+    public-equivalent pair, but it works for any two inputs. *)
+Definition obs_agree_on
+  (prog : list (toplevel_entity typ (block typ * list (block typ))))
+  (args1 args2 : list Z) : Checker :=
+  let t1 := z_to_obs (vellvm_collect_obs_args prog args1) in
+  let t2 := z_to_obs (vellvm_collect_obs_args prog args2) in
+  if obs_trace_eqb t1 t2 then checker true
+  else whenFail
+         ("NI unsound: public-equivalent inputs leak differently. args1 = "
+          ++ show args1 ++ " -> " ++ show_obs_trace t1
+          ++ " | args2 = " ++ show args2 ++ " -> " ++ show_obs_trace t2
+          ++ " | Ast: " ++ ReprAST.repr prog)
+         false.
+
+(** Discard (not pass) a non-testable sample, recording [reason] in the
+    QuickChick run summary. [tt : unit] is QuickChick's discard result
+    ([testUnit] yields [rejected], the same outcome a false [==>] premise
+    produces); [collect] tags the discarded case with its reason so it
+    surfaces in the stats instead of being silently counted as a success. *)
+Definition discard_with (reason : string) : Checker := collect reason tt.
+
+(** NI soundness check, structured like Triosecuris [test_ni]
+    ([Triosecuris/TestingLib.v:285]). The inputs we can vary are exactly
+    [main]'s argument vector (currently one [i32], but written generally):
+
+    1. Draw a random baseline argument vector [base_args] — the random
+       "initial state".
+    2. Run the taint tracker once on it → [pub_regs]; this output *drives*
+       which arguments count as public (held) vs secret (varied), exactly
+       as [test_ni] builds [P] from the tracked [tvars].
+    3. Draw a public-equivalent partner [args']: arguments the tracker calls
+       public are held equal to [base_args], the rest are re-randomised
+       (the analogue of [gen_pub_equiv_same_ty]).
+    4. [obs_agree_on] requires the two traces to match; any divergence is a
+       flow the tracker missed (unsoundness).
+
+    Generator failures and non-testable programs are *discarded* (with a
+    reason), not counted as passes. When every argument is public,
+    [args' = base_args] and the pair trivially agrees — the "held equal"
+    case, so no separate gate is needed. (Memory is not varied: this
+    generator has no memory input; secret-dependent addresses still surface
+    in the trace.) *)
 Definition vellvm_taint_soundness_partition (p : string + PROG) : Checker :=
   match p with
-  | inl _msg => checker true     (* generator failure: skip *)
+  | inl msg => discard_with ("generator failed: " ++ msg)
   | inr (Prog prog) =>
-      match find_secret_arg prog with
-      | None =>
-          (* No secret parameter — should not happen with
-             gen_PROG_with_secret_nofun, but skip defensively. *)
-          checker true
-      | Some secret_id =>
-          let pub_regs := vellvm_taint_public_regs prog [42%Z] in
-          let trace1 := z_to_obs (vellvm_collect_obs_args prog [42%Z]) in
-          let trace2 := z_to_obs (vellvm_collect_obs_args prog [137%Z]) in
-          if raw_id_in_list secret_id pub_regs then
-            (* Tracker says secret is in the public partition — the
-               property doesn't constrain trace1 vs trace2. Accept. *)
-            checker true
-          else
-            (* Tracker says secret is NOT public — traces must match
-               across different secret values, otherwise unsound. *)
-            if obs_trace_eqb trace1 trace2 then checker true
-            else whenFail
-                   ("Traces differ on safe input. trace(42) = "
-                    ++ show_obs_trace trace1
-                    ++ " | trace(137) = " ++ show_obs_trace trace2
-                    ++ " | Ast: " ++ ReprAST.repr prog)
-                   false
+      match find_main_arg_ids prog with
+      | [] => discard_with "main has no arguments to vary"
+      | arg_ids =>
+          forAll (gen_arg_vector (List.length arg_ids)) (fun base_args =>
+            let pub_regs := vellvm_taint_public_regs prog base_args in
+            forAll (gen_pub_equiv_args arg_ids pub_regs base_args)
+              (fun args' => obs_agree_on prog base_args args'))
       end
   end.
 
