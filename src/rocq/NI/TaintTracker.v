@@ -257,17 +257,13 @@ Section PureUpdates.
             args []
         in
         mk_tstate pc (maybe_update_tregs iid (join_taints arg_taints pc) tr) ob tm
-    (* Load and Store are overridden in the semantic module. The
-       fallthrough here is just defensive and AST-only. *)
-    | INSTR_Load _ (_, ptr) _ =>
-        let ptr_taint := calc_taint_exp ptr tr in
-        let obs_taint := join_taints (join_taints ptr_taint pc) ob in
-        mk_tstate pc (maybe_update_tregs iid (join_taints ptr_taint pc) tr) obs_taint tm
-    | INSTR_Store (_, val) (_, ptr) _ =>
-        let ptr_taint := calc_taint_exp ptr tr in
-        let obs_taint := join_taints (join_taints ptr_taint pc) ob in
-        mk_tstate pc tr obs_taint tm
-    | _ => ts
+    (* Load and Store never reach here: [denote_instr_taint] intercepts them
+       with dedicated semantic cases (they need the concrete address). A
+       well-formed Load is always [IId _] and a Store always [IVoid _], so
+       both are handled there and fall through to the catch-all below, which
+       is therefore unreachable for them -- it only ever runs the AST-only
+       no-op for the remaining instruction kinds (gep, bitcast, conv, ...). *)
+    | _ => ts (* Load/Store: unreachable (overridden); others: AST-only no-op. *)
     end.
 
   (** Phi pickup: argument taint comes from the incoming block. *)
