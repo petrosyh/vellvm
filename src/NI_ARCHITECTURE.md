@@ -46,13 +46,12 @@ Pure Rocq, lives in QuickChick land. Produces parsed LLVM ASTs.
 
 **Entry points** (in [rocq/QC/GenAST.v](rocq/QC/GenAST.v)):
 
-- `gen_llvm` — `main` takes no args.
-- `gen_llvm_with_args` — `main(i32, …)` with 1–4 random i32 args.
-- `gen_llvm_with_secret` — `main(i32 %secret)`, may have helper functions.
-- `gen_llvm_with_secret_nofun` — `main(i32 %secret)`, **no** helper
-  functions. Required for the partition-style taint tracker because
-  `denote_function_taint` does not yet handle inter-procedural calls
-  (`CallE`).
+- `gen_llvm` — `main` takes no args (the default Vellvm generator).
+- `gen_llvm_with_args_nofun` — `main` takes a size-scaled number (>= 1) of
+  i32 args and the program has **no** helper functions. Required for the
+  partition-style taint tracker because `denote_function_taint` does not
+  handle inter-procedural calls (`CallE`). This is the generator the NI
+  test uses.
 
 `gen_PROG_*` wrappers live in
 [rocq/QC/NITests.v](rocq/QC/NITests.v).
@@ -250,20 +249,23 @@ partition.
 Active property `vellvm_taint_soundness_partition` in
 [rocq/QC/NITests.v](rocq/QC/NITests.v).
 
-For each random `Prog`:
+For each random `Prog` (whose `main` takes a vector of i32 args):
 
-1. Find `main`'s first i32 parameter (its `raw_id`).
-2. Run the tracker via `-taint-track-args 42` → get `TOBS_REGS`.
-3. Run the plain interpreter via `-interpret-obs-args 42` and
-   `-interpret-obs-args 137` → get two traces.
-4. If `secret` is **in** `TOBS_REGS`: the tracker permits trace
-   divergence; trivially accept.
-5. If `secret` is **not in** `TOBS_REGS`: the tracker claims it's
-   safe; the two traces must match. If they don't, the tracker is
+1. Draw a random baseline argument vector `base_args`.
+2. Run the tracker via `-taint-track-args <base_args>` → get `TOBS_REGS`
+   (the public partition for this run).
+3. Draw a **public-equivalent** partner `args'`: each argument whose
+   register is in `TOBS_REGS` keeps its `base_args` value; the rest (the
+   tracker's "safe to vary" complement) are re-randomised.
+4. Run the plain interpreter via `-interpret-obs-args` on `base_args` and
+   on `args'` → get two observation traces.
+5. The two traces must match. If they don't, some argument the tracker
+   called non-public influenced an observation → the tracker is
    **unsound** — report counterexample.
 
-A successful run on N samples means: no sampled program had
-`secret ∉ TOBS_REGS` but actually-different traces.
+A successful run on N samples means: no sampled program leaked through an
+argument the tracker placed outside the public partition. (When every
+argument is public, `args' = base_args` and the check passes trivially.)
 
 ### Shell-out, not in-process
 
@@ -292,7 +294,7 @@ fixtures in [../ni_examples/](../ni_examples/) — see
 
 | File | Role |
 |---|---|
-| [rocq/QC/GenAST.v](rocq/QC/GenAST.v) | Generators (`gen_llvm_with_secret_nofun`, …) |
+| [rocq/QC/GenAST.v](rocq/QC/GenAST.v) | Generators (`gen_llvm_with_args_nofun`, …) |
 | [rocq/QC/NITests.v](rocq/QC/NITests.v) | QC property + shell-out axioms |
 | [rocq/Semantics/InterpretationStack.v](rocq/Semantics/InterpretationStack.v) | `event_obs`, `observe_L2`, `interp_mcfg4_exec_obs` |
 | [rocq/Semantics/TopLevel.v](rocq/Semantics/TopLevel.v) | `interpreter_gen_obs` |

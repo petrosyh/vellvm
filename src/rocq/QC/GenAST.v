@@ -3306,23 +3306,6 @@ Section InstrGenerators.
   Definition gen_main_tle : GenLLVM (toplevel_entity typ (block typ * list (block typ)))
     := ret TLE_Definition <*> gen_main.
 
-  (** Like [gen_main], but [main] takes one [i32] argument — the "secret"
-      input for NI testing. *)
-  Definition gen_main_with_secret : GenLLVM (definition typ (block typ * list (block typ)))
-    := gen_definition (Name "main") (TYPE_I 8) [TYPE_I 32].
-
-  Definition gen_main_with_secret_tle : GenLLVM (toplevel_entity typ (block typ * list (block typ)))
-    := ret TLE_Definition <*> gen_main_with_secret.
-
-  (** Generate [main] with a random number (1–4) of [i32] arguments. *)
-  Definition gen_main_with_args : GenLLVM (definition typ (block typ * list (block typ)))
-    := n <- lift (choose (1%nat, 4%nat));;
-       let args := List.repeat (TYPE_I 32) n in
-       gen_definition (Name "main") (TYPE_I 8) args.
-
-  Definition gen_main_with_args_tle : GenLLVM (toplevel_entity typ (block typ * list (block typ)))
-    := ret TLE_Definition <*> gen_main_with_args.
-
   Definition gen_typ_tle : GenLLVM (toplevel_entity typ (block typ * list (block typ)))
     :=
     name <- new_local_id;;
@@ -3383,38 +3366,27 @@ Section InstrGenerators.
     let new_globals := (globals ++ map TLE_Global res_globals)%list in
     ret (high_levels ++ defined_typs ++ new_globals ++ functions ++ [main])%list.
 
-  (** Like [gen_llvm], but [main] takes 1–4 [i32] arguments. *)
-  Definition gen_llvm_with_args : GenLLVM (list (toplevel_entity typ (block typ * list (block typ))))
-    :=
-    high_levels <- gen_list_high_level_tle;;
-    defined_typs <- gen_typ_tle_multiple;;
-    globals <- gen_global_tle_multiple;;
-    functions <- gen_helper_function_tle_multiple;;
-    main <- gen_main_with_args_tle;;
-    res_globals <- get_global_memo;;
-    let new_globals := (globals ++ map TLE_Global res_globals)%list in
-    ret (high_levels ++ defined_typs ++ new_globals ++ functions ++ [main])%list.
+  (** [main] with a size-scaled random number (>= 1) of [i32] arguments;
+      the count grows with the QuickChick size parameter. Change [S sz] to
+      tune the upper bound. *)
+  Definition gen_main_with_args_n : GenLLVM (definition typ (block typ * list (block typ)))
+    := n <- sized_LLVM (fun sz => lift (choose (1%nat, S sz)));;
+       let args := List.repeat (TYPE_I 32) n in
+       gen_definition (Name "main") (TYPE_I 8) args.
 
-  (** Like [gen_llvm], but [main] takes one [i32] argument (the secret). *)
-  Definition gen_llvm_with_secret : GenLLVM (list (toplevel_entity typ (block typ * list (block typ))))
-    :=
-    high_levels <- gen_list_high_level_tle;;
-    defined_typs <- gen_typ_tle_multiple;;
-    globals <- gen_global_tle_multiple;;
-    functions <- gen_helper_function_tle_multiple;;
-    main <- gen_main_with_secret_tle;;
-    res_globals <- get_global_memo;;
-    let new_globals := (globals ++ map TLE_Global res_globals)%list in
-    ret (high_levels ++ defined_typs ++ new_globals ++ functions ++ [main])%list.
+  Definition gen_main_with_args_n_tle : GenLLVM (toplevel_entity typ (block typ * list (block typ)))
+    := ret TLE_Definition <*> gen_main_with_args_n.
 
-  (** Like [gen_llvm_with_secret], but without helper functions.
-      Used by the QC test (no inter-procedural calls in the taint pipeline). *)
-  Definition gen_llvm_with_secret_nofun : GenLLVM (list (toplevel_entity typ (block typ * list (block typ))))
+  (** Full program whose [main] takes a size-scaled number (>= 1) of [i32]
+      arguments, with NO helper functions, so the partition-style taint
+      tracker (which does not handle inter-procedural [CallE]) applies. This
+      is the generator used by the NI soundness test in NITests.v. *)
+  Definition gen_llvm_with_args_nofun : GenLLVM (list (toplevel_entity typ (block typ * list (block typ))))
     :=
     high_levels <- gen_list_high_level_tle;;
     defined_typs <- gen_typ_tle_multiple;;
     globals <- gen_global_tle_multiple;;
-    main <- gen_main_with_secret_tle;;
+    main <- gen_main_with_args_n_tle;;
     res_globals <- get_global_memo;;
     let new_globals := (globals ++ map TLE_Global res_globals)%list in
     ret (high_levels ++ defined_typs ++ new_globals ++ [main])%list.

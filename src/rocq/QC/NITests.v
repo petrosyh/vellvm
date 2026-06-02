@@ -1,20 +1,23 @@
 (** * NI Soundness QuickChick Test (partition-style)
 
-    Property under test:
-      For each randomly generated program [P] with [main(i32 %secret)],
-      run the partition-style taint tracker on [P] with one secret value.
-      It outputs [TOBS_REGS] (the set of register names in the public
-      partition) and [TOBS_ADDRS] (the set of memory addresses).
+    Property under test (a partition-style analogue of Triosecuris's
+    [test_ni]):
+      For each randomly generated program [P] whose [main] takes a vector
+      of [i32] arguments, draw a random baseline argument vector and run the
+      partition-style taint tracker on [P] with it. The tracker outputs
+      [TOBS_REGS] (the register names in the public partition) and
+      [TOBS_ADDRS] (the memory addresses).
 
-      The complement of [TOBS_REGS] is the set of register names whose
-      values may be varied without changing the observation trace.
+      Then draw a *public-equivalent* partner argument vector: arguments
+      whose register is in [TOBS_REGS] are held equal, the rest (the
+      tracker's "safe to vary" complement) are re-randomised.
 
       Soundness check:
-        if [secret] (the name of [main]'s i32 parameter) is *not* in
-        [TOBS_REGS], then two runs with two different secret values
-        must produce identical observation traces.
+        the two argument vectors must produce identical observation traces
+        (they agree on everything the tracker called public).
 
-      Counterexample on this property = the tracker is unsound.
+      Counterexample on this property = the tracker is unsound (it missed a
+      flow from a supposedly-non-public argument into an observation).
 
     The harness shells out to the [./vellvm] binary because Coq
     extraction cannot directly call the pipeline (different module
@@ -69,8 +72,11 @@ Inductive PROG :=
 #[global] Instance Show_PROG : Show PROG :=
   { show p := "" (* avoid expensive printing during QC *) }.
 
-Definition gen_PROG_with_secret_nofun : GenLLVM PROG :=
-  prog <- gen_llvm_with_secret_nofun ;;
+(** Wraps [gen_llvm_with_args_nofun]: [main] takes a size-scaled number
+    (>= 1) of [i32] arguments and the program has no helper functions. The
+    NI property below works over the whole argument vector. *)
+Definition gen_PROG_with_args_nofun : GenLLVM PROG :=
+  prog <- gen_llvm_with_args_nofun ;;
   ret (Prog prog).
 
 (* ================================================================= *)
@@ -355,5 +361,5 @@ Definition vellvm_taint_soundness_partition (p : string + PROG) : Checker :=
 Extract Constant defNumTests => "1000".
 
 QuickChick
-  (forAll (run_GenLLVM gen_PROG_with_secret_nofun)
+  (forAll (run_GenLLVM gen_PROG_with_args_nofun)
           vellvm_taint_soundness_partition).

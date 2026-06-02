@@ -288,6 +288,15 @@ into `CallE`, so generated programs must have no helper functions.
 
 **Result.** Clean build; `./vellvm` rebuilt; all five Definitions registered.
 
+> **Superseded (2026-06-02).** The single-secret generators
+> (`gen_main_with_secret`, `gen_main_with_secret_tle`, `gen_llvm_with_secret`,
+> `gen_llvm_with_secret_nofun`) and the fixed 1–4-arg generators
+> (`gen_main_with_args`, `gen_main_with_args_tle`, `gen_llvm_with_args`)
+> listed above were later **removed**. The NI test now uses
+> `gen_llvm_with_args_nofun` (size-scaled i32 args, no helper functions) and
+> a public-equivalent input-pair check. See
+> [NI_ARCHITECTURE.md](NI_ARCHITECTURE.md).
+
 ## Phase 6 — clean `rocq/NI/TaintTracker.v`
 
 The central piece of the refactor: replace the old `TaintTrackingSemantic.v`

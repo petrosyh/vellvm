@@ -228,6 +228,14 @@ Untracked (do NOT commit — your local env):
 | `src/Makefile` | `+ ni-tests` target (`VELLVM_BIN="$$(pwd)/vellvm" $(ROCQEXEC) rocq/QC/NITests.v`). |
 | `src/_RocqProject` | `+ ./rocq/NI/TaintTracker.v`. 7 `InfiniteToFinite*.v` files commented out for build speed (they're heavyweight refinement proofs not needed for NI testing — only the `BigIntptr` model is used at runtime). |
 
+> **Superseded (2026-06-02).** The 5 `GenAST.v` generators noted above
+> (`gen_main_with_secret`, `gen_main_with_args`, `gen_llvm_with_args`,
+> `gen_llvm_with_secret`, `gen_llvm_with_secret_nofun`) and the wrapper
+> `gen_PROG_with_secret_nofun` were later **removed**. The NI test now uses
+> `gen_llvm_with_args_nofun` (size-scaled i32 args, no helper functions) with
+> a public-equivalent input-pair check. See
+> [NI_ARCHITECTURE.md](NI_ARCHITECTURE.md).
+
 ### Files different between the two branches
 
 The Rocq files have minor adaptations between branches because of

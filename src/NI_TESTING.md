@@ -239,9 +239,10 @@ exact same observation pipeline, so they should always agree.
 A QuickChick property `vellvm_taint_soundness_partition` is defined
 in [rocq/QC/NITests.v](rocq/QC/NITests.v) and exposed via
 `make ni-tests`. It samples random programs via
-`gen_PROG_with_secret_nofun`, queries the tracker for the public
-partition, picks a secret name from the complement, and asserts that
-the observation traces under two different secret values agree.
+`gen_PROG_with_args_nofun`, runs the tracker on a random baseline
+argument vector to get the public partition, draws a public-equivalent
+partner vector (public arguments held equal, the rest re-randomised), and
+asserts that the two observation traces agree.
 
 As of this writing the automated invocation is **blocked on an
 upstream regression**: `QCVellvm.v` on `origin/dev` no longer compiles
