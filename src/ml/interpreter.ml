@@ -256,8 +256,9 @@ let rec step_taint_obs m =
 
 (** Partition-style taint tracker driven from OCaml. Composes:
       1. [TopLevelBigIntptr.build_global_environment]
-      2. [TaintTrackerBigIntptr.denote_function_taint] (itree L0')
-      3. [Recursion.interp_mrec] (L0' -> L0; trivial since no calls)
+      2. [TaintTrackerBigIntptr.denote_mcfg_taint] (itree L0'; resolves and
+         inlines every call itself, so the tree contains no [CallE])
+      3. [Recursion.interp_mrec] (L0' -> L0; trivial since no [CallE] remains)
       4. [InterpreterStackBigIntptr.interp_mcfg4_exec_obs] *)
 let interpret_with_args_taint_obs
       (args : int list)
@@ -292,7 +293,8 @@ let interpret_with_args_taint_obs
             (Obj.magic (TopLevel.TopLevelBigIntptr.build_global_environment mcfg))
             (fun (_ : unit) ->
                let t_L0' =
-                 TaintTracker.TaintTrackerBigIntptr.denote_function_taint
+                 TaintTracker.TaintTrackerBigIntptr.denote_mcfg_taint
+                   (Obj.magic mcfg.CFG.m_definitions)
                    main_def (Obj.magic arg_uvals)
                in
                Recursion.interp_mrec

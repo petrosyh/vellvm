@@ -699,6 +699,13 @@ Module Denotation (LP : LLVMParams) (MP : MemoryParams LP) (Byte : ByteModule LP
              match call with
              | Call dt fv args =>
                dfv <- concretize_or_pick fv;;
+               (* Emit the call-target observation (control-flow leakage):
+                  which function is called is attacker-visible, like a
+                  branch direction. *)
+               (match dfv with
+                | DVALUE_Addr a => debug_call (PTOI.ptr_to_int a)
+                | _ => ret tt
+                end);;
                match (lookup_defn dfv fundefs) with
                | Some f_den => (* If the call is internal *)
                  f_den args

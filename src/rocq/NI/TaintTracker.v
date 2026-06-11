@@ -2,8 +2,8 @@
 
     Every SSA variable and every memory location is its own taint source.
     The output [ts_tobs] is the set of source identities that influenced
-    an observation event (Load/Store address or branch direction) during
-    the execution.
+    an observation event (a Load/Store address, a branch direction, or a
+    call target) during the execution.
 
     That set IS the public partition: any source identity NOT in
     [ts_tobs] is guaranteed not to affect the observation trace, so
@@ -22,6 +22,12 @@
       - Load/Store cases in [denote_instr_taint] duplicate the event
         sequence from [denote_instr] in order to access the concrete
         memory address ([da] from [concretize_or_pick_unique]).
+      - Calls are inter-procedural:
+        [denote_function_taint_rec] recurses into the callee, resolving the
+        target address like the real [denote_mcfg] (so both direct and
+        indirect calls work) and threading [tstate] through; a [debug_call]
+        makes the call target observable (control-flow leakage). [fuel]
+        bounds the call depth.
         Every other instruction kind falls through to [denote_instr]
         and applies a pure AST-only taint update.
       - The tracker is built as a Module functor over [LLVMParams] and
@@ -291,6 +297,12 @@ Section PureUpdates.
         let pc' := join_taints te pc in
         let ob' := join_taints pc' ob in
         mk_tstate pc' tr ob' tm
+    (* On return, stash the returned value's taint in [ts_tpc] so the
+       caller's call site can read it back. The callee's pc is frame-local
+       and discarded by the caller, so reusing it as the return-taint
+       channel is safe (see [denote_instr_taint]'s INSTR_Call case). *)
+    | TERM_Ret v =>
+        mk_tstate (join_taints (calc_taint_texp v tr) pc) tr ob tm
     | _ => ts
     end.
 
@@ -317,13 +329,64 @@ Module Make (LP : LLVMParams) (MEM : Memory LP).
     | _ => None
     end.
 
+  (* ============================================================== *)
+  (** *** Inter-procedural support                                    *)
+  (* ============================================================== *)
+
+  (** A call handler runs one call and returns [(tstate, retval)] with the
+      callee's final memory/obs taint merged in and the return value's taint
+      stashed in [ts_tpc] (see [taint_term_gen]'s TERM_Ret). It is built
+      inside [denote_function_taint_rec], closing over the decremented fuel
+      so the recursion stays structural.
+
+      Arguments: call dtyp, the function-pointer taint, the evaluated
+      function value [fv], the argument values + taints, and the caller's
+      [tstate]. [ch] resolves [fv]'s concrete address against the function
+      table (inline) -- handling *both* direct and indirect calls -- or
+      falls back to [ExternalCall], exactly as the real [denote_mcfg] does. *)
+  Definition CallHandler : Type :=
+    dtyp -> taint -> uvalue -> list uvalue -> list taint -> tstate
+      -> itree L0' (tstate * uvalue).
+
+  (** Resolve a callee [definition] by its integer address, mirroring
+      upstream [lookup_defn] (which keys an [IntMap] on [ptr_to_int addr]).
+      The table is built once at entry from each function's global address,
+      so indirect calls through [ptrtoint]/[inttoptr] round-trips resolve
+      just like the real pipeline. *)
+  Fixpoint lookup_defn_by_addr
+    (tbl : list (Z * definition dtyp (cfg dtyp))) (a : Z)
+    : option (definition dtyp (cfg dtyp)) :=
+    match tbl with
+    | [] => None
+    | (z, df) :: rest =>
+        if Z.eqb z a then Some df else lookup_defn_by_addr rest a
+    end.
+
+  (** Build a fresh callee register-taint map by binding each formal
+      parameter to the corresponding argument taint (the taint analogue of
+      upstream [combine_lists_varargs], which binds args to params by value).
+      This is how the caller's argument taints cross the call boundary into
+      the callee's parameters. (Self-tagging in [treg_lookup] still adds each
+      register's own identity on read.) *)
+  Fixpoint bind_param_taints (formals : list raw_id) (ats : list taint) : treg_map :=
+    match formals, ats with
+    | f :: fs, a :: rest => (f, a) :: bind_param_taints fs rest
+    | _, _ => []
+    end.
+
+  (** Call-depth bound for the taint tracker's direct recursion. Generated
+      programs have shallow call graphs; on exhaustion we [raise] (the run
+      is then dropped, never counted as a pass). *)
+  Definition taint_call_fuel : nat := 1000.
+
   (** Denote one instruction AND thread the taint state. Load and Store
       are duplicated so we can grab the concrete address [da] for
-      memory-taint lookup / update; every other case delegates to
-      [denote_instr] and applies the pure AST-only update. *)
-  Definition denote_instr_taint
+      memory-taint lookup / update; a direct [INSTR_Call] is inlined via
+      the call handler [ch]; every other case delegates to [denote_instr]
+      and applies the pure AST-only update. *)
+  Definition denote_instr_taint (ch : CallHandler)
     (i : instr_id * instr dtyp) (varargs : option ADDR.addr)
-    (ts : tstate) : itree instr_E tstate :=
+    (ts : tstate) : itree L0' tstate :=
     let '(iid, instr_body) := i in
     let tr := ts_tregs ts in
     let pc := ts_tpc ts in
@@ -333,7 +396,7 @@ Module Make (LP : LLVMParams) (MEM : Memory LP).
 
     (* ---- LOAD: duplicate event sequence, capture concrete address ---- *)
     | IId id, INSTR_Load dt (du, ptr) _ =>
-        ua <- translate exp_to_instr (denote_exp (Some du) ptr) ;;
+        ua <- translate exp_to_L0' (denote_exp (Some du) ptr) ;;
         da <- concretize_or_pick_unique ua ;;
         uv <- trigger (Load dt da) ;;
         trigger (LocalWrite id uv) ;;
@@ -355,8 +418,8 @@ Module Make (LP : LLVMParams) (MEM : Memory LP).
 
     (* ---- STORE: duplicate event sequence, update memory taint ---- *)
     | IVoid _, INSTR_Store (dt, val) (du, ptr) _ =>
-        uv <- translate exp_to_instr (denote_exp (Some dt) val) ;;
-        ua <- translate exp_to_instr (denote_exp (Some du) ptr) ;;
+        uv <- translate exp_to_L0' (denote_exp (Some dt) val) ;;
+        ua <- translate exp_to_L0' (denote_exp (Some du) ptr) ;;
         da <- concretize_or_pick_unique ua ;;
         match da with
         | DVALUE_Poison _ => raiseUB "Store to poisoned address."
@@ -375,84 +438,221 @@ Module Make (LP : LLVMParams) (MEM : Memory LP).
                          end in
         ret (mk_tstate pc tr obs_taint new_tmem)
 
+    (* ---- CALL: intrinsics delegate (old behavior); any other call is
+            handled via the call handler [ch], which resolves the target
+            address -- inlining a defined function (direct or indirect) or
+            falling back to ExternalCall. ---- *)
+    | _, INSTR_Call (dt, f) cargs _ =>
+        match intrinsic_exp f with
+        | Some _ =>
+            (* intrinsic (e.g. the llvm.va_start family): let denote_instr
+               handle it, then apply the conservative AST-only call taint. *)
+            translate instr_to_L0' (denote_instr (iid, instr_body) varargs) ;;
+            ret (taint_instr_pure iid instr_body ts)
+        | None =>
+            (* evaluate the arguments and the function operand in the caller
+               frame (their events and taints), exactly as the real
+               [denote_instr] does, then hand off to [ch], which resolves
+               [fv]'s address to a defined function (inline) or falls back to
+               the same [ExternalCall] the real [denote_mcfg] uses. *)
+            uvs <- map_monad
+                     (fun '(t, op) => translate exp_to_L0' (denote_exp (Some t) op))
+                     (List.map fst cargs) ;;
+            let arg_taints :=
+              List.map (fun '(_, op) => calc_taint_exp op tr) (List.map fst cargs) in
+            fv <- translate exp_to_L0' (denote_exp None f) ;;
+            let f_taint := calc_taint_exp f tr in
+            '(tsc, rv) <- ch dt f_taint fv uvs arg_taints ts ;;
+            (* make the return value available to subsequent instrs *)
+            (match iid with
+             | IId id  => trigger (LocalWrite id rv)
+             | IVoid _ => ret tt
+             end) ;;
+            (* the dest taint was stashed in [ts_tpc tsc] (callee's return
+               taint for an inlined call, or the conservative call taint for
+               an external one); join with caller pc and write into dest.
+               tobs/tmem are global -- take the callee's updated copies. *)
+            let ret_taint := join_taints (ts_tpc tsc) pc in
+            let regs' := match iid with
+                         | IId id  => treg_update tr id ret_taint
+                         | IVoid _ => tr
+                         end in
+            ret (mk_tstate pc regs' (ts_tobs tsc) (ts_tmem tsc))
+        end
+
     (* ---- Other instructions: delegate to denote_instr, AST-only update ---- *)
     | _, _ =>
-        denote_instr (iid, instr_body) varargs ;;
+        translate instr_to_L0' (denote_instr (iid, instr_body) varargs) ;;
         ret (taint_instr_pure iid instr_body ts)
     end.
 
   (** Thread tstate through a list of instructions. *)
-  Fixpoint denote_code_taint (c : code dtyp) (varargs : option ADDR.addr)
-    (ts : tstate) : itree instr_E tstate :=
+  Fixpoint denote_code_taint (ch : CallHandler) (c : code dtyp)
+    (varargs : option ADDR.addr) (ts : tstate) : itree L0' tstate :=
     match c with
     | [] => ret ts
     | i :: rest =>
-        ts' <- denote_instr_taint i varargs ts ;;
-        denote_code_taint rest varargs ts'
+        ts' <- denote_instr_taint ch i varargs ts ;;
+        denote_code_taint ch rest varargs ts'
     end.
 
   (** Denote a block (phis, code, terminator) and thread tstate. *)
-  Definition denote_block_taint (b : block dtyp) (bid_from : block_id)
+  Definition denote_block_taint (ch : CallHandler) (b : block dtyp) (bid_from : block_id)
     (varargs : option ADDR.addr) (ts : tstate)
-    : itree instr_E (tstate * (block_id + uvalue)) :=
-    denote_phis bid_from (blk_phis b) ;;
+    : itree L0' (tstate * (block_id + uvalue)) :=
+    translate instr_to_L0' (denote_phis bid_from (blk_phis b)) ;;
     let ts1 := List.fold_left
                  (fun ts' '(id, p) => taint_phi_gen id p bid_from ts')
                  (blk_phis b) ts in
-    ts2 <- denote_code_taint (blk_code b) varargs ts1 ;;
+    ts2 <- denote_code_taint ch (blk_code b) varargs ts1 ;;
     let ts3 := taint_term_gen (blk_term b) ts2 in
-    r <- translate exp_to_instr (denote_terminator (blk_term b)) ;;
+    r <- translate exp_to_L0' (denote_terminator (blk_term b)) ;;
     ret (ts3, r).
 
-  Definition denote_ocfg_taint (bks : ocfg dtyp) (varargs : option ADDR.addr)
+  Definition denote_ocfg_taint (ch : CallHandler) (bks : ocfg dtyp)
+    (varargs : option ADDR.addr)
     : (tstate * (block_id * block_id))
-      -> itree instr_E
+      -> itree L0'
                ((tstate * (block_id * block_id)) + (tstate * uvalue)) :=
     iter (C := ktree _) (bif := sum)
       (fun '(ts, (bid_from, bid_src)) =>
         match find_block bks bid_src with
         | None => ret (inr (inl (ts, (bid_from, bid_src))))
         | Some block_src =>
-            '(ts', bd) <- denote_block_taint block_src bid_from varargs ts ;;
+            '(ts', bd) <- denote_block_taint ch block_src bid_from varargs ts ;;
             match bd with
             | inr dv => ret (inr (inr (ts', dv)))
             | inl bid_target => ret (inl (ts', (bid_src, bid_target)))
             end
         end).
 
-  Definition denote_cfg_taint (f : cfg dtyp) (varargs : option ADDR.addr)
-    (ts : tstate)
-    : itree instr_E (tstate * uvalue) :=
-    r <- denote_ocfg_taint (blks f) varargs (ts, (init f, init f)) ;;
+  Definition denote_cfg_taint (ch : CallHandler) (f : cfg dtyp)
+    (varargs : option ADDR.addr) (ts : tstate)
+    : itree L0' (tstate * uvalue) :=
+    r <- denote_ocfg_taint ch (blks f) varargs (ts, (init f, init f)) ;;
     match r with
     | inl (_ts', _bid) =>
         raise "Block not found in denote_cfg_taint"
     | inr (ts', uv) => ret (ts', uv)
     end.
 
-  (** Denote a function with taint tracking. Inlines the call-frame
-      setup ([MemPush] / [StackPush] / [Alloca] for varargs / [Store]),
-      same shape as upstream [denote_function]. Old base has no
-      [push_call_frame] / [pop_call_frame] helpers. *)
-  Definition denote_function_taint
+  (** Denote a function with taint tracking, recursing through direct
+      calls. [fuel] bounds the call depth.
+      Mirrors upstream [denote_function]'s call-frame setup ([MemPush] /
+      [StackPush] / [Alloca] for varargs / [Store] / ... / [StackPop] /
+      [MemPop]). SSA frames save/restore for free via Gallina recursion
+      (the caller's [tstate] stays in scope); only [ts_tobs]/[ts_tmem]
+      (global) are merged back from the callee.
+
+      [caller_ts] supplies the shared memory/obs taint and the control
+      (pc) taint at the call site; the callee runs with a *fresh* register
+      map whose parameters are bound to [arg_taints] (see
+      [bind_param_taints]). *)
+  Fixpoint denote_function_taint_rec
+    (fundefs_t : list (Z * definition dtyp (cfg dtyp))) (fuel : nat)
     (df : definition dtyp (cfg dtyp)) (args : list uvalue)
+    (arg_taints : list taint) (caller_ts : tstate)
     : itree L0' (tstate * uvalue) :=
-    '(bs, vs) <- lift_err ret (combine_lists_varargs (df_args df) args) ;;
-    dts <- lift_err ret (map_monad dtyp_of_uvalue_fun vs) ;;
-    let dt := DTYPE_Packed_struct dts in
-    trigger MemPush ;;
-    trigger (StackPush bs) ;;
-    varargs_dv <- trigger (Alloca dt 1 None) ;;
-    trigger (Store dt varargs_dv (UVALUE_Packed_struct vs)) ;;
-    match varargs_dv with
-    | DVALUE_Addr varg =>
-        '(ts_final, rv) <- translate instr_to_L0'
-                                  (denote_cfg_taint (df_instrs df) (Some varg) init_tstate) ;;
-        trigger StackPop ;;
-        trigger MemPop ;;
-        ret (ts_final, rv)
-    | _ => raise "Non-address returned from alloca in denote_function_taint"
+    match fuel with
+    | O => raise "Taint tracker: call-depth fuel exhausted."
+    | S fuel' =>
+        (* External / indirect call: mirror [denote_mcfg]'s [ExternalCall]
+           fallback so the observation trace stays aligned with the real
+           pipeline, and taint the result conservatively by the function
+           pointer, the arguments, and the caller pc. [fv] is the
+           already-evaluated function value, [f_taint] its taint. *)
+        let external_call_taint : CallHandler :=
+          fun dt f_taint fv uvs ats cts =>
+            dargs <- map_monad (fun uv => concretize_or_pick_unique uv) uvs ;;
+            rv <- fmap dvalue_to_uvalue (trigger (ExternalCall dt fv dargs)) ;;
+            let call_taint :=
+              List.fold_left join_taints ats (join_taints f_taint (ts_tpc cts)) in
+            ret (mk_tstate call_taint (ts_tregs cts)
+                           (join_taints (ts_tobs cts) call_taint) (ts_tmem cts), rv) in
+        (* Call handler closes over the decremented fuel so the recursion
+           stays structural for Coq's guard checker. Resolve [fv]'s concrete
+           address against the function table (inline) exactly as the real
+           [denote_mcfg]/[lookup_defn]; otherwise external. *)
+        let ch : CallHandler :=
+          fun dt f_taint fv uvs ats cts =>
+            dfv <- concretize_or_pick fv ;;
+            (* Call-target observation (control-flow leakage): which target
+               is called is observable, like a branch direction. So the
+               function pointer's taint enters the public partition, and
+               [debug_call] emits the same call-target obs as the real
+               [denote_mcfg] so the traces stay aligned. *)
+            let cts' :=
+              mk_tstate (ts_tpc cts) (ts_tregs cts)
+                        (join_taints (ts_tobs cts) (join_taints f_taint (ts_tpc cts)))
+                        (ts_tmem cts) in
+            match dvalue_to_addr_z dfv with
+            | Some a =>
+                debug_call a ;;
+                match lookup_defn_by_addr fundefs_t a with
+                | Some cdf => denote_function_taint_rec fundefs_t fuel' cdf uvs ats cts'
+                | None     => external_call_taint dt f_taint fv uvs ats cts'
+                end
+            | None => external_call_taint dt f_taint fv uvs ats cts'
+            end in
+        '(bs, vs) <- lift_err ret (combine_lists_varargs (df_args df) args) ;;
+        dts <- lift_err ret (map_monad dtyp_of_uvalue_fun vs) ;;
+        let dt := DTYPE_Packed_struct dts in
+        trigger MemPush ;;
+        trigger (StackPush bs) ;;
+        varargs_dv <- trigger (Alloca dt 1 None) ;;
+        trigger (Store dt varargs_dv (UVALUE_Packed_struct vs)) ;;
+        match varargs_dv with
+        | DVALUE_Addr varg =>
+            let callee_ts :=
+              mk_tstate (ts_tpc caller_ts)
+                        (bind_param_taints (df_args df) arg_taints)
+                        (ts_tobs caller_ts) (ts_tmem caller_ts) in
+            '(ts_final, rv) <- denote_cfg_taint ch (df_instrs df) (Some varg) callee_ts ;;
+            trigger StackPop ;;
+            trigger MemPop ;;
+            ret (ts_final, rv)
+        | _ => raise "Non-address returned from alloca in denote_function_taint_rec"
+        end
     end.
+
+  (** Build the address-keyed function table by reading each function's
+      global address (the same [GlobalRead] the real [address_one_function]
+      uses), so direct *and* indirect calls resolve by concrete address. *)
+  Definition build_fundefs_t (defs : list (definition dtyp (cfg dtyp)))
+    : itree L0' (list (Z * definition dtyp (cfg dtyp))) :=
+    map_monad
+      (fun cdf =>
+         fa <- translate exp_to_L0'
+                 (denote_exp None
+                    (EXP_Ident (ID_Global (dc_name (df_prototype cdf))))) ;;
+         dfa <- concretize_or_pick fa ;;
+         ret (match dvalue_to_addr_z dfa with
+              | Some a => (a, cdf)
+              | None   => ((-1)%Z, cdf)
+              end))
+      defs.
+
+  (** Entry point: build the function table, then run [main] with taint
+      tracking. Direct and indirect calls both resolve by concrete address,
+      mirroring the real [denote_mcfg]. *)
+  Definition denote_mcfg_taint
+    (defs : list (definition dtyp (cfg dtyp)))
+    (main : definition dtyp (cfg dtyp)) (args : list uvalue)
+    : itree L0' (tstate * uvalue) :=
+    fundefs_t <- build_fundefs_t defs ;;
+    (* Mirror the entry call to [main] that the real [denote_vellvm] makes
+       through [denote_mcfg], so the call-target obs stream aligns (the
+       real pipeline emits a [debug_call] for the top-level main invocation;
+       its target is constant, so it never leaks). *)
+    ma <- translate exp_to_L0'
+            (denote_exp None (EXP_Ident (ID_Global (dc_name (df_prototype main))))) ;;
+    dma <- concretize_or_pick ma ;;
+    (match dvalue_to_addr_z dma with
+     | Some a => debug_call a
+     | None   => ret tt
+     end) ;;
+    denote_function_taint_rec fundefs_t taint_call_fuel main args
+      (List.map (fun _ => @nil taint_src) args) init_tstate.
 
 End Make.
 
@@ -473,8 +673,9 @@ Module TaintTrackerBigIntptr :=
     uses [Obj.magic] to bridge:
 
       1. [TopLevelBigIntptr.build_global_environment]
-      2. [TaintTrackerBigIntptr.denote_function_taint]
-      3. [Recursion.interp_mrec]   (L0' → L0; trivial since no CallE)
+      2. [TaintTrackerBigIntptr.denote_mcfg_taint]   (inlines calls itself)
+      3. [Recursion.interp_mrec]   (L0' → L0; trivial since no CallE -- the
+         taint tracker resolves and inlines every call, so the tree has none)
       4. [InterpreterStackBigIntptr.interp_mcfg4_exec_obs]
 
     See [src/NI_ARCHITECTURE.md]. *)

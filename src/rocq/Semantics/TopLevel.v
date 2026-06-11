@@ -572,8 +572,9 @@ Module Type LLVMTopLevel (IS : InterpreterStack).
     in interp_mcfg4_exec t [] ([],[]) 0 initial_memory_state.
 
   (** Like [interpreter_gen] but uses the observation-collecting pipeline.
-      Result wraps an extra [list Z] of Load/Store addresses and branch
-      directions (see [event_obs] / [observe_L2] in InterpretationStack.v). *)
+      Result wraps an extra [list Z] of Load/Store addresses, branch
+      directions, and call targets (see [event_obs] / [observe_L2] in
+      InterpretationStack.v). *)
   Definition interpreter_gen_obs
     (ret_typ : dtyp)
     (entry : string)

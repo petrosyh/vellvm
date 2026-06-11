@@ -3378,9 +3378,9 @@ Section InstrGenerators.
     := ret TLE_Definition <*> gen_main_with_args_n.
 
   (** Full program whose [main] takes a size-scaled number (>= 1) of [i32]
-      arguments, with NO helper functions, so the partition-style taint
-      tracker (which does not handle inter-procedural [CallE]) applies. This
-      is the generator used by the NI soundness test in NITests.v. *)
+      arguments, with NO helper functions -- the simpler, call-free program
+      shape. (The [_withfun] variant adds helper functions to exercise the
+      inter-procedural taint tracker; both are valid NI test generators.) *)
   Definition gen_llvm_with_args_nofun : GenLLVM (list (toplevel_entity typ (block typ * list (block typ))))
     :=
     high_levels <- gen_list_high_level_tle;;
@@ -3390,5 +3390,21 @@ Section InstrGenerators.
     res_globals <- get_global_memo;;
     let new_globals := (globals ++ map TLE_Global res_globals)%list in
     ret (high_levels ++ defined_typs ++ new_globals ++ [main])%list.
+
+  (** Full program whose [main] takes a size-scaled number (>= 1) of [i32]
+      arguments AND which may contain helper functions (so [main] can emit
+      [INSTR_Call]). This is the generator for the inter-procedural taint
+      tracker; it mirrors [gen_llvm] but swaps [gen_main_tle] for the
+      multi-arg [gen_main_with_args_n_tle]. *)
+  Definition gen_llvm_with_args_withfun : GenLLVM (list (toplevel_entity typ (block typ * list (block typ))))
+    :=
+    high_levels <- gen_list_high_level_tle;;
+    defined_typs <- gen_typ_tle_multiple;;
+    globals <- gen_global_tle_multiple;;
+    functions <- gen_helper_function_tle_multiple;;
+    main <- gen_main_with_args_n_tle;;
+    res_globals <- get_global_memo;;
+    let new_globals := (globals ++ map TLE_Global res_globals)%list in
+    ret (high_levels ++ defined_typs ++ new_globals ++ functions ++ [main])%list.
 
 End InstrGenerators.

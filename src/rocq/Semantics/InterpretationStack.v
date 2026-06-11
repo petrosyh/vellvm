@@ -53,6 +53,7 @@ Module Type InterpreterStack_common (LP : LLVMParams) (MEM : Memory LP).
       - [Store _ (DVALUE_Addr a) _]   → negative: [- ptr_to_int a]
       - [DebugBranch true]            → 1000000
       - [DebugBranch false]           → 1000001
+      - [DebugCall z]                 → 2000000 + z  (call target)
       Returns [None] for events that are not observable in this sense.
 
       Old-base L2 on [9557f168]:
@@ -69,6 +70,12 @@ Module Type InterpreterStack_common (LP : LLVMParams) (MEM : Memory LP).
         Some 1000000%Z
     | inr1 (inr1 (inr1 (inr1 (inr1 (inr1 (inl1 (DebugBranch false))))))) =>
         Some 1000001%Z
+    (* Call target (control-flow leakage observation): encoded as
+       2000000 + target address. Target addresses are non-negative, so this
+       band is disjoint from Load (+addr), Store (-addr), and the branch
+       sentinels. *)
+    | inr1 (inr1 (inr1 (inr1 (inr1 (inr1 (inl1 (DebugCall z))))))) =>
+        Some (2000000 + z)%Z
     | _ => None
     end.
 
@@ -146,7 +153,8 @@ Module Type InterpreterStack_common (LP : LLVMParams) (MEM : Memory LP).
       L4_trace.
 
     (** Like [interp_mcfg4_exec] but inserts [observe_L2] at L2 to collect
-        Load/Store addresses and branch directions into the result. *)
+        Load/Store addresses, branch directions, and call targets into the
+        result. *)
     Definition interp_mcfg4_exec_obs {R} (t: itree L0 R) g l sid m :=
       let uvalue_trace   := interp_intrinsics t in
       let L1_trace       := interp_global uvalue_trace g in
