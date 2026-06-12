@@ -57,6 +57,7 @@ From Vellvm Require Import
      Semantics.LLVMEvents
      Semantics.LLVMParams
      Semantics.Lang
+     Semantics.LangObs
      Semantics.MemoryAddress
      Semantics.MemoryParams
      Handlers.MemoryModel
@@ -317,7 +318,11 @@ Arguments taint_term_gen   {T} _ _.
 (* ================================================================= *)
 
 Module Make (LP : LLVMParams) (MEM : Memory LP).
-  Module LLVM := Lang.Make LP MEM.
+  (* LangObs, not Lang: the taint pipeline must denote function bodies
+     with the observation-instrumented DenotationObs (branch/call debug
+     events), mirroring what the real obs pipeline emits. The stock
+     [-interpret] pipeline keeps using Lang/Denotation. *)
+  Module LLVM := LangObs.Make LP MEM.
   Import LP.
   Import LP.Events.
   Import LLVM.D.

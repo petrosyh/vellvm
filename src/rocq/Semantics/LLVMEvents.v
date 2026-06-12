@@ -116,30 +116,16 @@ Set Contextual Implicit.
    but debug is probably a less confusing name for us. *)
   Variant DebugE : Type -> Type :=
   | Debug : unit -> DebugE unit
+  (* NI-testing observation carriers (branch direction / concretized call
+     target). Inert for the stock pipeline: only DenotationObs.v emits
+     them and only TopLevelObs.v decodes them; the helpers that trigger
+     them live in DenotationObs.v. *)
   | DebugBranch : bool -> DebugE unit
-  (* Emitted at every call with the (concretized) target address, so that
-     which function is called becomes an observable event. Control flow is
-     part of the leakage model: the call target is observable just like a
-     conditional-branch direction (cf. Triosecuris's [OCall]). Decoded by
-     [event_obs] in InterpretationStack.v. *)
   | DebugCall : Z -> DebugE unit.
 
   (* Utilities to conveniently trigger debug events *)
   Definition debug {E} `{DebugE -< E} (msg : string) : itree E unit :=
     trigger (Debug (print_msg msg)).
-
-  (* Emit a branch direction. Used by [TERM_Br] in Denotation.v so that
-     conditional-branch directions become observable events at L2 via
-     [observe_L2] in InterpretationStack.v. *)
-  Definition debug_branch {E} `{DebugE -< E} (b : bool) : itree E unit :=
-    trigger (DebugBranch b).
-
-  (* Emit a call-target observation (the concretized callee address). Used
-     by [denote_mcfg] (real pipeline) and the taint tracker so the call
-     target becomes observable at L2 via [observe_L2] -- control-flow
-     leakage, the same category as branch directions. *)
-  Definition debug_call {E} `{DebugE -< E} (target : Z) : itree E unit :=
-    trigger (DebugCall target).
 
   (* Failure. Carries a string for a message. *)
   Variant FailureE : Type -> Type :=

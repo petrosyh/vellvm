@@ -53,6 +53,7 @@
 ./rocq/Semantics.v
 ./rocq/Semantics/ConcretizationParams.v
 ./rocq/Semantics/Denotation.v
+./rocq/Semantics/DenotationObs.v
 ./rocq/Semantics/DynamicValues.v
 ./rocq/Semantics/GepM.v
 ./rocq/Semantics/StoreId.v
@@ -71,6 +72,7 @@
 ./rocq/Semantics/LLVMEvents.v
 ./rocq/Semantics/LLVMParams.v
 ./rocq/Semantics/Lang.v
+./rocq/Semantics/LangObs.v
 ./rocq/Semantics/Memory/ErrSID.v
 ./rocq/Semantics/Memory/FiniteProvenance.v
 ./rocq/Semantics/Memory/MemBytes.v
@@ -83,6 +85,7 @@
 ./rocq/Semantics/RuttProps.v
 ./rocq/Semantics/Printfdefn.v
 ./rocq/Semantics/TopLevel.v
+./rocq/Semantics/TopLevelObs.v
 ./rocq/Semantics/VellvmIntegers.v
 ./rocq/Syntax.v
 ./rocq/Syntax/AstLib.v

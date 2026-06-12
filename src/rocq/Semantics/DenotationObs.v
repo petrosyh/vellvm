@@ -1,3 +1,17 @@
+(** * DenotationObs: observation-instrumented denotation (NI pipeline)
+
+    Identical to [Denotation.v] except for exactly three insertions that
+    make control flow observable (the NI leakage model):
+      - [debug_branch true/false] in the [TERM_Br] case
+      - [debug_call target]       in [denote_mcfg]'s call handler
+    [Denotation.v] is the stock upstream denotation (base 9557f168) used
+    by the plain [-interpret] pipeline; this module is used by the
+    [-interpret-obs-args] / [-taint-track-args] NI pipelines (via
+    [LangObs.v]). Keep the two files in sync: any upstream change to
+    Denotation.v must be mirrored here (diff the files — the only
+    differences must be the three insertions and this header).
+*)
+
 (* -------------------------------------------------------------------------- *
  *                     Vellvm - the Verified LLVM project                     *
  *                                                                            *
@@ -107,12 +121,22 @@ Open Scope N_scope.
     itrees in the second phase.
  *)
 
-Module Denotation (LP : LLVMParams) (MP : MemoryParams LP) (Byte : ByteModule LP.ADDR LP.IP LP.SIZEOF LP.Events MP.BYTE_IMPL) (CP : ConcretizationParams LP MP Byte).
+Module DenotationObs (LP : LLVMParams) (MP : MemoryParams LP) (Byte : ByteModule LP.ADDR LP.IP LP.SIZEOF LP.Events MP.BYTE_IMPL) (CP : ConcretizationParams LP MP Byte).
   Import CP.
   Import CONC.
   Import MP.
   Import LP.
   Import Events.
+
+  (* Triggers for the NI observation carriers (the constructors live in
+     LLVMEvents.v's DebugE; only this denotation emits them). Defined
+     here rather than in LLVMEvents.v to keep that upstream file
+     untouched beyond the two constructors. *)
+  Definition debug_branch {E} `{DebugE -< E} (b : bool) : itree E unit :=
+    trigger (DebugBranch b).
+
+  Definition debug_call {E} `{DebugE -< E} (target : Z) : itree E unit :=
+    trigger (DebugCall target).
 
   Definition dv_zero_initializer (t:dtyp) : err dvalue :=
     default_dvalue_of_dtyp t.
@@ -539,8 +563,10 @@ Module Denotation (LP : LLVMParams) (MP : MemoryParams LP) (Byte : ByteModule LP
       match dv with
       | @DVALUE_I 1 comparison_bit =>
         if equ comparison_bit one then
+          debug_branch true;;
           ret (inl br1)
         else
+          debug_branch false;;
           ret (inl br2)
       | DVALUE_Poison dt => raiseUB "Branching on poison."
       | _ => raise "Br got non-bool value"
@@ -697,6 +723,13 @@ Module Denotation (LP : LLVMParams) (MP : MemoryParams LP) (Byte : ByteModule LP
              match call with
              | Call dt fv args =>
                dfv <- concretize_or_pick fv;;
+               (* Emit the call-target observation (control-flow leakage):
+                  which function is called is attacker-visible, like a
+                  branch direction. *)
+               (match dfv with
+                | DVALUE_Addr a => debug_call (PTOI.ptr_to_int a)
+                | _ => ret tt
+                end);;
                match (lookup_defn dfv fundefs) with
                | Some f_den => (* If the call is internal *)
                  f_den args
@@ -706,4 +739,4 @@ Module Denotation (LP : LLVMParams) (MP : MemoryParams LP) (Byte : ByteModule LP
                end
              end)
           _ (Call dt f_value args).
-End Denotation.
+End DenotationObs.

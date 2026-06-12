@@ -222,7 +222,7 @@ let interpret_with_args_obs
     lazy (ITreeDefinition.Coq_go (ITreeDefinition.RetF (Obj.magic arg_uvals)))
   in
   let t =
-    TopLevel.TopLevelBigIntptr.interpreter_gen_obs
+    TopLevelObs.TopLevelBigIntptrObs.interpreter_gen_obs
       (DynamicTypes.DTYPE_I sz32)
       ('m' :: 'a' :: 'i' :: 'n' :: [])
       args_itree
@@ -307,7 +307,7 @@ let interpret_with_args_taint_obs
         )
       in
       let t_obs =
-        InterpretationStack.InterpreterStackBigIntptr.interp_mcfg4_exec_obs
+        TopLevelObs.TopLevelBigIntptrObs.interp_mcfg4_exec_obs
           (Obj.magic t) [] ([], []) BinNums.N0
           InterpretationStack.InterpreterStackBigIntptr.MEM.MMEP.MMSP.initial_memory_state
       in

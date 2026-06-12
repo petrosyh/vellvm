@@ -27,6 +27,29 @@ header) and `src/ni_corpus_stats.py` — neither affects test results.
 
 ---
 
+## 2026-06-12 — pipeline-split refactor + erasure recheck vs pristine semantics
+
+- **Change under test**: a pure refactor that moves all NI observation
+  plumbing into dedicated files (`DenotationObs.v`, `LangObs.v`,
+  `TopLevelObs.v`) and restores every stock semantics file
+  byte-identical to the upstream base `9557f168` (Denotation,
+  InterpretationStack, TopLevel, DenotationTheory; LLVMEvents keeps
+  only two inert DebugE constructors). The plain `-interpret` pipeline
+  therefore denotes the original upstream itree again.
+- **Validation**:
+  - Pre/post-split equivalence: obs traces and taint partitions
+    byte-identical on reference programs.
+  - NI smoke: 600/600 passed, 0 failures, usual discard profile.
+  - **Erasure corpus campaign rerun against the now-pristine stock
+    pipeline**: 8,484 programs, **0 real divergences** (8,402 identical
+    results, 80 identical error reasons, 1 double timeout, 1 one-sided
+    timeout re-proven in isolation to be a parallel-load flake).
+- **Significance**: this closes the scope caveat of the previous
+  erasure entry — the debug-event extension is no longer common to
+  both paths, so the comparison now covers the *full* instrumentation
+  delta (debug-event emission + `observe_L2` tap + argument injection)
+  against the unmodified upstream semantics.
+
 ## 2026-06-12 — erasure check: obs instrumentation is conservative
 
 - **Commit**: `f4f027a3` (semantics code identical to `c0c0bd6a`).
