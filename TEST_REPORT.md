@@ -27,6 +27,30 @@ header) and `src/ni_corpus_stats.py` — neither affects test results.
 
 ---
 
+## 2026-06-12 — erasure check: obs instrumentation is conservative
+
+- **Commit**: `f4f027a3` (semantics code identical to `c0c0bd6a`).
+- **Property**: erasing the observation instrumentation must leave the
+  original Vellvm semantics. For each program: path A = our
+  `-interpret-obs-args` pipeline on the original program; path B = the
+  stock `-interpret` pipeline (no observation tap) on a wrapper that
+  bakes the same arguments in as constants. Compared: termination class
+  and final dvalue / error reason (obs output deliberately ignored).
+- **Scope caveat**: both paths share this fork's *denotation*, which
+  already emits the added branch/call debug events (Denotation.v). This
+  campaign therefore validates the `observe_L2` tap and the argument
+  injection, but NOT the debug-event extension itself (common to both
+  paths). Validating that last delta needs a true-upstream baseline
+  build — tracked as follow-up work.
+- **Setup**: replay of the full 8,484-program corpus, deterministic
+  per-file argument vectors, 12-way parallel, 5 s timeout.
+- **Result**: **0 real divergences.** 8,401 identical results, 80
+  identical error reasons, 1 double-timeout (neutral). 2 one-sided
+  timeouts re-run in isolation: both match — parallel-load flakes.
+- **Tools**: `src/erasure_corpus_check.sh` (corpus replay);
+  `src/rocq/QC/ErasureTests.v` + `src/run_erasure_parallel.sh`
+  (generative variant of the same property, for ongoing campaigns).
+
 ## 2026-06-12 — generated-program corpus statistics
 
 - **Commit**: `c0c0bd6a` (generator identical in all campaigns above).
