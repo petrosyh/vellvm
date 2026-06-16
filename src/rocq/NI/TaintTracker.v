@@ -170,44 +170,107 @@ Section ExpTaint.
     | EXP_Integer _ | EXP_Float _ | EXP_Double _ | EXP_Hex _
     | EXP_Bool _   | EXP_Null    | EXP_Zero_initializer
     | EXP_Undef    | EXP_Poison  => []
-    (* Aggregates: collect taint of every component. *)
+    (* Aggregates: collect taint of every component.
+       Category-1 (missing-taint) mutation sites below use the QuickChick
+       (*! *) convention, driven by ni_mutation_run.py. Default code is
+       correct; each mutant drops a data-flow operand's taint. *)
     | EXP_Cstring fields
     | EXP_Struct fields
     | EXP_Packed_struct fields =>
+        (*! *)
         List.fold_left
           (fun acc '(_, e) => join_taints acc (calc_taint_exp e tr))
           fields []
+        (*!! agg-struct-drop *)
+        (*! [] *)
     | EXP_Array _ fields
     | EXP_Vector _ fields =>
+        (*! *)
         List.fold_left
           (fun acc '(_, e) => join_taints acc (calc_taint_exp e tr))
           fields []
+        (*!! agg-array-drop *)
+        (*! [] *)
     | OP_IBinop _ _ v1 v2
     | OP_FBinop _ _ _ v1 v2 =>
+        (*! *)
         join_taints (calc_taint_exp v1 tr) (calc_taint_exp v2 tr)
+        (*!! ibinop-drop-v1 *)
+        (*! calc_taint_exp v2 tr *)
+        (*!! ibinop-drop-v2 *)
+        (*! calc_taint_exp v1 tr *)
     | OP_ICmp _ _ v1 v2
     | OP_FCmp _ _ v1 v2 =>
+        (*! *)
         join_taints (calc_taint_exp v1 tr) (calc_taint_exp v2 tr)
-    | OP_Conversion _ _ v _ => calc_taint_exp v tr
+        (*!! icmp-drop-v1 *)
+        (*! calc_taint_exp v2 tr *)
+        (*!! icmp-drop-v2 *)
+        (*! calc_taint_exp v1 tr *)
+    | OP_Conversion _ _ v _ =>
+        (*! *)
+        calc_taint_exp v tr
+        (*!! conv-drop *)
+        (*! [] *)
     | OP_GetElementPtr _ (_, pv) idxs =>
+        (*! *)
         List.fold_left
           (fun acc '(_, idx) => join_taints acc (calc_taint_exp idx tr))
           idxs (calc_taint_exp pv tr)
+        (*!! gep-drop-base *)
+        (*! List.fold_left (fun acc '(_, idx) => join_taints acc (calc_taint_exp idx tr)) idxs [] *)
+        (*!! gep-drop-idxs *)
+        (*! calc_taint_exp pv tr *)
     | OP_Select (_, cnd) (_, v1) (_, v2) =>
+        (*! *)
         join_taints (calc_taint_exp cnd tr)
           (join_taints (calc_taint_exp v1 tr) (calc_taint_exp v2 tr))
+        (*!! select-drop-cnd *)
+        (*! join_taints (calc_taint_exp v1 tr) (calc_taint_exp v2 tr) *)
+        (*!! select-drop-v1 *)
+        (*! join_taints (calc_taint_exp cnd tr) (calc_taint_exp v2 tr) *)
+        (*!! select-drop-v2 *)
+        (*! join_taints (calc_taint_exp cnd tr) (calc_taint_exp v1 tr) *)
     | OP_ExtractElement (_, vec) (_, idx) =>
+        (*! *)
         join_taints (calc_taint_exp vec tr) (calc_taint_exp idx tr)
+        (*!! extractelt-drop-vec *)
+        (*! calc_taint_exp idx tr *)
+        (*!! extractelt-drop-idx *)
+        (*! calc_taint_exp vec tr *)
     | OP_InsertElement (_, vec) (_, elt) (_, idx) =>
+        (*! *)
         join_taints (calc_taint_exp vec tr)
           (join_taints (calc_taint_exp elt tr) (calc_taint_exp idx tr))
+        (*!! insertelt-drop-vec *)
+        (*! join_taints (calc_taint_exp elt tr) (calc_taint_exp idx tr) *)
+        (*!! insertelt-drop-elt *)
+        (*! join_taints (calc_taint_exp vec tr) (calc_taint_exp idx tr) *)
+        (*!! insertelt-drop-idx *)
+        (*! join_taints (calc_taint_exp vec tr) (calc_taint_exp elt tr) *)
     | OP_ShuffleVector (_, v1) (_, v2) (_, mask) =>
+        (*! *)
         join_taints (calc_taint_exp v1 tr)
           (join_taints (calc_taint_exp v2 tr) (calc_taint_exp mask tr))
-    | OP_ExtractValue (_, vec) _ => calc_taint_exp vec tr
+        (*!! shuffle-drop *)
+        (*! [] *)
+    | OP_ExtractValue (_, vec) _ =>
+        (*! *)
+        calc_taint_exp vec tr
+        (*!! extractval-drop *)
+        (*! [] *)
     | OP_InsertValue (_, vec) (_, elt) _ =>
+        (*! *)
         join_taints (calc_taint_exp vec tr) (calc_taint_exp elt tr)
-    | OP_Freeze (_, v) => calc_taint_exp v tr
+        (*!! insertval-drop-vec *)
+        (*! calc_taint_exp elt tr *)
+        (*!! insertval-drop-elt *)
+        (*! calc_taint_exp vec tr *)
+    | OP_Freeze (_, v) =>
+        (*! *)
+        calc_taint_exp v tr
+        (*!! freeze-drop *)
+        (*! [] *)
     end.
 
   Definition calc_taint_texp (te : T * @exp T) (tr : treg_map) : taint :=
@@ -281,7 +344,12 @@ Section PureUpdates.
               | Some (_, e) => calc_taint_exp e (ts_tregs ts)
               | None        => []
               end in
-    let rt := join_taints te (ts_tpc ts) in
+    let rt :=
+      (*! *)
+      join_taints te (ts_tpc ts)
+      (*!! phi-drop-te *)
+      (*! ts_tpc ts *)
+    in
     mk_tstate (ts_tpc ts) (treg_update (ts_tregs ts) id rt)
               (ts_tobs ts) (ts_tmem ts).
 
@@ -303,7 +371,10 @@ Section PureUpdates.
        and discarded by the caller, so reusing it as the return-taint
        channel is safe (see [denote_instr_taint]'s INSTR_Call case). *)
     | TERM_Ret v =>
+        (*! *)
         mk_tstate (join_taints (calc_taint_texp v tr) pc) tr ob tm
+        (*!! ret-drop-val *)
+        (*! mk_tstate pc tr ob tm *)
     | _ => ts
     end.
 
@@ -413,7 +484,13 @@ Module Make (LP : LLVMParams) (MEM : Memory LP).
                          | None   => []
                          end in
         let result_taint :=
-          join_taints (join_taints ptr_taint mem_taint) pc in
+          (*! *)
+          join_taints (join_taints ptr_taint mem_taint) pc
+          (*!! load-result-drop-ptr *)
+          (*! join_taints mem_taint pc *)
+          (*!! load-result-drop-mem *)
+          (*! join_taints ptr_taint pc *)
+        in
         (* The address itself is observable (the Load reveals that this
            specific cell was read). Join it into [tobs] so it appears in
            the public partition. *)
@@ -437,8 +514,14 @@ Module Make (LP : LLVMParams) (MEM : Memory LP).
         (* The store address is observable. *)
         let obs_taint :=
           join_taints (join_taints (join_taints addr_self ptr_taint) pc) ob in
+        let stored_taint :=
+          (*! *)
+          join_taints val_taint pc
+          (*!! store-drop-val *)
+          (*! pc *)
+        in
         let new_tmem  := match addr_z with
-                         | Some z => tmem_update tm z (join_taints val_taint pc)
+                         | Some z => tmem_update tm z stored_taint
                          | None   => tm
                          end in
         ret (mk_tstate pc tr obs_taint new_tmem)
@@ -477,7 +560,12 @@ Module Make (LP : LLVMParams) (MEM : Memory LP).
                taint for an inlined call, or the conservative call taint for
                an external one); join with caller pc and write into dest.
                tobs/tmem are global -- take the callee's updated copies. *)
-            let ret_taint := join_taints (ts_tpc tsc) pc in
+            let ret_taint :=
+              (*! *)
+              join_taints (ts_tpc tsc) pc
+              (*!! call-drop-ret *)
+              (*! pc *)
+            in
             let regs' := match iid with
                          | IId id  => treg_update tr id ret_taint
                          | IVoid _ => tr
