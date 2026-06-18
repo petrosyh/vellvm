@@ -156,7 +156,11 @@ Extract Constant vellvm_run_obs_result_str =>
        String.concat "","" (List.map
          (fun z -> string_of_int (Big_int_Z.int_of_big_int z)) args)
      in
-     let vellvm = try Sys.getenv ""VELLVM_BIN"" with Not_found -> ""./vellvm"" in
+     let vellvm =
+       (try Sys.getenv ""VELLVM_BIN"" with Not_found ->
+          (try List.find Sys.file_exists
+                 [""./vellvm""; ""src/vellvm""; ""../vellvm""; ""../../vellvm""; ""../../../vellvm""]
+           with Not_found -> ""./vellvm"")) in
      let cmd =
        ""timeout 5 "" ^ vellvm ^ "" -interpret-obs-args "" ^ args_str ^
        "" "" ^ llvm_file ^ "" 2>&1""
@@ -201,7 +205,11 @@ Extract Constant vellvm_run_interp_result_str =>
      let oc = open_out llvm_file in
      output_string oc prog_str;
      close_out oc;
-     let vellvm = try Sys.getenv ""VELLVM_BIN"" with Not_found -> ""./vellvm"" in
+     let vellvm =
+       (try Sys.getenv ""VELLVM_BIN"" with Not_found ->
+          (try List.find Sys.file_exists
+                 [""./vellvm""; ""src/vellvm""; ""../vellvm""; ""../../vellvm""; ""../../../vellvm""]
+           with Not_found -> ""./vellvm"")) in
      let cmd =
        ""timeout 5 "" ^ vellvm ^ "" -interpret "" ^ llvm_file ^ "" 2>&1""
      in
