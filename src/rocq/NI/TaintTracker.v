@@ -477,7 +477,6 @@ Module Make (LP : LLVMParams) (MEM : Memory LP).
         uv <- trigger (Load dt da) ;;
         trigger (LocalWrite id uv) ;;
         let addr_z    := dvalue_to_addr_z da in
-        let addr_self := match addr_z with Some z => [inr z] | None => [] end in
         let ptr_taint := calc_taint_exp ptr tr in
         let mem_taint := match addr_z with
                          | Some z => tmem_lookup tm z
@@ -491,11 +490,13 @@ Module Make (LP : LLVMParams) (MEM : Memory LP).
           (*!! load-result-drop-mem *)
           (*! join_taints ptr_taint pc *)
         in
-        (* The address itself is observable (the Load reveals that this
-           specific cell was read). Join it into [tobs] so it appears in
-           the public partition. *)
+        (* The load address is observable. Its determining inputs are
+           [ptr_taint], which enter [tobs]. (The concrete cell label [inr z]
+           is redundant -- the address-determining inputs are already in
+           [ptr_taint], and cell-content leakage is tracked via the dest
+           taint -- so it is not added.) *)
         let obs_taint :=
-          join_taints (join_taints (join_taints addr_self ptr_taint) pc) ob in
+          join_taints (join_taints ptr_taint pc) ob in
         ret (mk_tstate pc (maybe_update_tregs iid result_taint tr) obs_taint tm)
 
     (* ---- STORE: duplicate event sequence, update memory taint ---- *)
@@ -508,12 +509,12 @@ Module Make (LP : LLVMParams) (MEM : Memory LP).
         | _ => trigger (Store dt da uv)
         end ;;
         let addr_z    := dvalue_to_addr_z da in
-        let addr_self := match addr_z with Some z => [inr z] | None => [] end in
         let ptr_taint := calc_taint_exp ptr tr in
         let val_taint := calc_taint_exp val tr in
-        (* The store address is observable. *)
+        (* The store address is observable: its determining inputs ([ptr_taint])
+           enter [tobs]. (The concrete cell label is redundant, so omitted.) *)
         let obs_taint :=
-          join_taints (join_taints (join_taints addr_self ptr_taint) pc) ob in
+          join_taints (join_taints ptr_taint pc) ob in
         let stored_taint :=
           (*! *)
           join_taints val_taint pc
