@@ -231,6 +231,8 @@ Section ExpTaint.
         (*! join_taints (calc_taint_exp cnd tr) (calc_taint_exp v2 tr) *)
         (*!! select-drop-v2 *)
         (*! join_taints (calc_taint_exp cnd tr) (calc_taint_exp v1 tr) *)
+        (*!! select-drop-cnd-v1 *)
+        (*! calc_taint_exp v2 tr *)
     | OP_ExtractElement (_, vec) (_, idx) =>
         (*! *)
         join_taints (calc_taint_exp vec tr) (calc_taint_exp idx tr)
