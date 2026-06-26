@@ -387,6 +387,11 @@ Axiom vellvm_taint_run_str : string -> list Z -> option (list string * list Z).
 
 Extract Constant vellvm_taint_run_str =>
   "fun prog_str args ->
+     (* DUMP: one MD5 of the generated program per taint call (to compare the
+        program SEQUENCE across orig vs flat at the same seed). *)
+     (let __dh = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/proghash.txt"" in
+      output_string __dh (Digest.to_hex (Digest.string prog_str));
+      output_string __dh ""\n""; close_out __dh);
      let llvm_file =
        Filename.(concat (get_temp_dir_name ())
          (Printf.sprintf ""ni_qc_trun_%d.ll"" (Unix.getpid ())))
@@ -841,8 +846,8 @@ Definition taint_obs_matches_real (p : string + PROG) : Checker :=
 (* ================================================================= *)
 
 Extract Constant defNumTests => "1000".
-(* For deterministic A/B experiments, override the seed (otherwise random):
-   [Extract Constant newRandomSeed => "(Random.State.make [| 12345 |])".] *)
+(* FIXED seed for before/after A/B (remove for random runs): *)
+Extract Constant newRandomSeed => "(Random.State.make [| 12345 |])".
 
 (* Faster soundness check: 2 shell-outs/test (one [vellvm_taint_run] for the
    partition + baseline obs, one [-interpret-obs-args] for the partner)
@@ -939,5 +944,57 @@ Definition exp_nogen_testing : Checker :=
        | None => checker true
        end).
 
+(* [FULL-ORIG] BEFORE optimization: 3 nested forAll's + serialize the .ll TWICE
+   (no caching). Same logic as exp_full_flat, just the pre-optimization shape.
+   For a clean before/after A/B (same seed) against exp_full_flat. *)
+(* stream-matched: generate prog/base/raw in the SAME order/amount as
+   gen_prog_base_raw (so it should draw the SAME programs as exp_full_flat),
+   but in a 3-forAll structure + serialize TWICE. Differs from flat ONLY in
+   forAll nesting (3 vs 1) and serialize count (2 vs 1). *)
+Definition exp_full_orig : Checker :=
+  forAll (run_GenLLVM gen_PROG_with_args_withfun) (fun p =>
+    match p with
+    | inl msg => discard_with ("generator failed: " ++ msg)
+    | inr (Prog prog) =>
+        match find_main_arg_ids prog with
+        | [] => discard_with "main has no arguments to vary"
+        | arg_ids =>
+            let n := List.length arg_ids in
+            forAll (gen_arg_vector n) (fun base_args =>
+              forAll (gen_arg_vector n) (fun raw =>
+                match vellvm_taint_run_cached (to_caml_str (show prog)) base_args with
+                | None => discard_with "UB or error on baseline"
+                | Some (pub_regs, base_obs_raw) =>
+                    let args' :=
+                      List.map (fun '(id, br2) =>
+                                  let '(b, r) := br2 in
+                                  if raw_id_in_list id pub_regs then b else r)
+                        (List.combine arg_ids (List.combine base_args raw)) in
+                    if list_Z_eqb args' base_args
+                    then discard_with "partner identical to baseline"
+                    else
+                      match vellvm_collect_obs_args_cached (to_caml_str (show prog)) args' with
+                      | None => discard_with "obs run incomplete (timeout/error)"
+                      | Some args_obs_raw =>
+                          if obs_trace_eqb (z_to_obs base_obs_raw) (z_to_obs args_obs_raw)
+                          then checker true
+                          else whenFail
+                                 ("NI unsound. base = " ++ show base_args
+                                  ++ " | args' = " ++ show args'
+                                  ++ " <<<LLBEGIN" ++ show prog ++ "LLEND>>>")
+                                 false
+                      end
+                  end))
+        end
+    end).
+
+Definition exp_force_calib_flat : Checker :=
+  forAll gen_prog_base_raw (fun pbr =>
+    let '(p, _) := pbr in
+    match p with
+    | inr (Prog l) => checker (force_str (to_caml_str (show l)))
+    | inl _ => checker true
+    end).
+
 (* ----- run one experiment (swap the identifier) ----- *)
-QuickChick exp_full_flat.
+QuickChick exp_force_calib_flat.
