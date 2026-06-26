@@ -103,7 +103,15 @@ let print_tobs_partition (ts : TaintTracker.tstate) =
 
 let process_ll_file command_line_arguments path file =
   let _ = Platform.verb @@ Printf.sprintf "* processing file: %s\n" path in
+  (* [BINARY TIMER] runs INSIDE the ./vellvm process, once per shell-out.
+     __tparse = time to PARSE the .ll text back into an AST (IO.parse_file) --
+     i.e. the cost of reconstructing the program the harness already had, paid
+     only because we cross a process boundary. __t1 marks the start of the
+     actual run (interpret / obs / taint) below. *)
+  let __t0 = Unix.gettimeofday () in
   let ll_ast = IO.parse_file path in
+  let __tparse = Unix.gettimeofday () -. __t0 in
+  let __t1 = Unix.gettimeofday () in
   let _ =
     if !interpret then
       match Interpreter.interpret command_line_arguments ll_ast with
@@ -134,6 +142,19 @@ let process_ll_file command_line_arguments path file =
         | Error e ->
             Printf.printf "Program error: %s\n" (Result.string_of_exit_condition e))
    | None -> ());
+  (* __trun = the ACTUAL run = interpret / obs-interpret / taint-track (only one
+     mode fires per invocation). This is the "실제 실험" phase, after parsing,
+     still inside the binary. Dominated by the program's runtime (loop counts),
+     so it varies wildly. *)
+  let __trun = Unix.gettimeofday () -. __t1 in
+  let __mode = (match !taint_track_args with
+                | Some _ -> "taint"
+                | None -> (match !interpret_obs_args with Some _ -> "obs" | None -> "interp")) in
+  (* Log "<mode> <parse_secs> <run_secs>" per binary invocation → /tmp/ni_phases.txt.
+     The harness's TIMER A (NITests.v) times the WHOLE process, so the
+     process-spawn + stdout-transfer overhead = (TIMER A) − (__tparse + __trun). *)
+  (let __oc = Stdlib.open_out_gen [Stdlib.Open_append; Stdlib.Open_creat] 0o644 "/tmp/ni_phases.txt" in
+   Printf.fprintf __oc "%s %f %f\n" __mode __tparse __trun; Stdlib.close_out __oc);
   let ll_ast' = transform ll_ast in
   let vll_file = Platform.gen_name !Platform.output_path file ".v.ll" in
   let _ = IO.output_file vll_file ll_ast' in

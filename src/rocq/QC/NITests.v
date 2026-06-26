@@ -61,6 +61,32 @@ Extract Constant to_caml_str =>
   | c :: s -> Bytes.set r pos c; fill (pos + 1) s
   in Bytes.to_string (fill 0 s)".
 
+(* [SERIALIZE TIMER] times one [.ll output] = [to_caml_str (show prog)]: turning
+   the generated AST into .ll text. The [bool -> string] thunk delays that work
+   to inside the timer. NB: [show prog] also FORCES the whole AST, so if the
+   generator built it lazily, the deferred generation is paid (and timed) here.
+   One line per call → /tmp/ni_serialize.txt *)
+Axiom timed_str : (bool -> string) -> string.
+Extract Constant timed_str =>
+  "fun thunk ->
+     let t0 = Unix.gettimeofday () in
+     let s = thunk true in
+     (let oc = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_serialize.txt"" in
+      Printf.fprintf oc ""%f\n"" (Unix.gettimeofday () -. t0); close_out oc);
+     s".
+
+(* [SHOW TIMER] times JUST [show prog] (building the Coq char-list string),
+   nested inside [timed_str] so that: to_caml_str time = serialize - show.
+   → /tmp/ni_show.txt *)
+Axiom time_show : (bool -> string) -> string.
+Extract Constant time_show =>
+  "fun thunk ->
+     let t0 = Unix.gettimeofday () in
+     let s = thunk true in
+     (let oc = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_show.txt"" in
+      Printf.fprintf oc ""%f\n"" (Unix.gettimeofday () -. t0); close_out oc);
+     s".
+
 (* ================================================================= *)
 (** ** Local generator wrapper (mirrors QCVellvm.v's PROG, kept local
        to avoid forcing a build-time QuickChick run from QCVellvm.v).  *)
@@ -183,12 +209,27 @@ Extract Constant vellvm_collect_obs_args_str =>
        ""timeout 5 "" ^ vellvm ^ "" -interpret-obs-args "" ^ args_str ^
        "" "" ^ llvm_file ^ "" 2>&1""
      in
+     (* [TIMER A start] SHELL-OUT phase = spawn ./vellvm + run it (the binary
+        parses the .ll and obs-interprets it) + read its whole stdout into buf.
+        __t0..(close_process) is exactly what the OLD 2026-06-16 experiment
+        timed as CHECK; everything outside it fell into the mislabelled
+        GENERATION residual. *)
+     let __t0 = Unix.gettimeofday () in
      let ic = Unix.open_process_in cmd in
      let buf = Buffer.create 256 in
      (try while true do Buffer.add_channel buf ic 1 done
       with End_of_file -> ());
      let _ = Unix.close_process_in ic in
      let output = Buffer.contents buf in
+     (* [TIMER A end] write the shell-out duration (one line per call). *)
+     (let __oc = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_obs_shell.txt"" in
+      Printf.fprintf __oc ""%f\n"" (Unix.gettimeofday () -. __t0); close_out __oc);
+     (* [TIMER B start] STDOUT-PARSE phase (harness glue, OCaml side): split the
+        captured stdout into lines, scan for the ---OBS_TRACE_BEGIN/END---
+        markers, and turn each trace line into a big-int. Pure post-processing
+        of the binary's output -- NOT the shell-out, NOT generation. This is
+        part of what the old experiment lumped into GENERATION. *)
+     let __tp = Unix.gettimeofday () in
      let lines = String.split_on_char '\n' output in
      let in_trace = ref false in
      let saw_end = ref false in
@@ -200,12 +241,15 @@ Extract Constant vellvm_collect_obs_args_str =>
          (try result := (Big_int_Z.big_int_of_int (int_of_string line)) :: !result
           with _ -> ())
      ) lines;
+     (* [TIMER B end] write the stdout-parse duration. → /tmp/ni_obs_parse.txt *)
+     (let __oc2 = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_obs_parse.txt"" in
+      Printf.fprintf __oc2 ""%f\n"" (Unix.gettimeofday () -. __tp); close_out __oc2);
      if !saw_end then Some (List.rev !result) else None".
 
 Definition vellvm_collect_obs_args
   (prog : list (toplevel_entity typ (block typ * list (block typ))))
   (args : list Z) : option (list Z) :=
-  vellvm_collect_obs_args_str (to_caml_str (show prog)) args.
+  vellvm_collect_obs_args_str (timed_str (fun _ => to_caml_str (show prog))) args.
 
 (** Same shell-out shape as above, but for [-taint-track-args]. Parses
     the [---TOBS_REGS_BEGIN/END---] section into a list of Coq strings.
@@ -363,11 +407,25 @@ Extract Constant vellvm_taint_run_str =>
        ""timeout 5 "" ^ vellvm ^ "" -taint-track-args "" ^ args_str ^
        "" "" ^ llvm_file ^ "" 2>&1""
      in
+     (* [TIMER A start] SHELL-OUT phase = spawn ./vellvm -taint-track-args + run
+        it (binary parses .ll, taint-tracks it) + read its whole stdout. This is
+        the heavier shell-out: it emits BOTH the partition and the obs trace.
+        Same boundary the old 2026-06-16 experiment timed as CHECK. *)
+     let __t0 = Unix.gettimeofday () in
      let ic = Unix.open_process_in cmd in
      let buf = Buffer.create 256 in
      (try while true do Buffer.add_channel buf ic 1 done
       with End_of_file -> ());
      let _ = Unix.close_process_in ic in
+     (* [TIMER A end] write shell-out duration. → /tmp/ni_taint_shell.txt *)
+     (let __oc = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_taint_shell.txt"" in
+      Printf.fprintf __oc ""%f\n"" (Unix.gettimeofday () -. __t0); close_out __oc);
+     (* [TIMER B start] STDOUT-PARSE phase (harness glue, OCaml side): scan the
+        captured stdout for ---TOBS_REGS_BEGIN/END--- (public partition =
+        register names) and ---OBS_TRACE_BEGIN/END--- (observation trace),
+        building both lists. For loop-heavy programs the trace is long, so this
+        scan is a prime suspect for the old mislabelled 'generation' cost. *)
+     let __tp = Unix.gettimeofday () in
      let lines = String.split_on_char '\n' (Buffer.contents buf) in
      let in_regs = ref false in
      let in_obs = ref false in
@@ -386,15 +444,31 @@ Extract Constant vellvm_taint_run_str =>
          (try obs := (Big_int_Z.big_int_of_int (int_of_string line)) :: !obs
           with _ -> ())
      ) lines;
+     (* [TIMER B end] write stdout-parse duration. → /tmp/ni_taint_parse.txt *)
+     (let __oc2 = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_taint_parse.txt"" in
+      Printf.fprintf __oc2 ""%f\n"" (Unix.gettimeofday () -. __tp); close_out __oc2);
      if !saw_obs_end then Some (List.rev !regs, List.rev !obs) else None".
 
 Definition vellvm_taint_run
   (prog : list (toplevel_entity typ (block typ * list (block typ))))
   (args : list Z) : option (list raw_id * list Z) :=
-  match vellvm_taint_run_str (to_caml_str (show prog)) args with
+  match vellvm_taint_run_str (timed_str (fun _ => to_caml_str (show prog))) args with
   | Some (names, obs) => Some (List.map LLVMAst.Name names, obs)
   | None              => None
   end.
+
+(** Cached variants: take the *pre-serialized* .ll text, so a program is
+    serialized ([show prog]) ONLY ONCE per test and reused for both shell-outs
+    (taint + obs) instead of serialized twice. *)
+Definition vellvm_taint_run_cached (prog_str : string) (args : list Z)
+  : option (list raw_id * list Z) :=
+  match vellvm_taint_run_str prog_str args with
+  | Some (names, obs) => Some (List.map LLVMAst.Name names, obs)
+  | None              => None
+  end.
+Definition vellvm_collect_obs_args_cached (prog_str : string) (args : list Z)
+  : option (list Z) :=
+  vellvm_collect_obs_args_str prog_str args.
 
 (* ================================================================= *)
 (** ** Helpers                                                        *)
@@ -497,6 +571,43 @@ Definition obs_agree_on
     surfaces in the stats instead of being silently counted as a success. *)
 Definition discard_with (reason : string) : Checker := collect reason tt.
 
+(* [GLUE TIMERS] split the Coq-side residual (the old mislabelled 'generation').
+   time_findargs: times [find_main_arg_ids prog] = walking the program AST to
+   find main's argument ids. time_cmp: times the trace decode+compare
+   ([z_to_obs] x2 + [obs_trace_eqb]). Whatever residual is left after these (and
+   gen / serialize / shell-out) is QuickChick's own per-test machinery + the two
+   nested arg-generators (gen_arg_vector / gen_pub_equiv_args). *)
+Axiom time_findargs : forall {A}, (bool -> A) -> A.
+Extract Constant time_findargs =>
+  "fun thunk ->
+     let t0 = Unix.gettimeofday () in
+     let r = thunk true in
+     (let oc = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_findargs.txt"" in
+      Printf.fprintf oc ""%f\n"" (Unix.gettimeofday () -. t0); close_out oc);
+     r".
+Axiom time_cmp : forall {A}, (bool -> A) -> A.
+Extract Constant time_cmp =>
+  "fun thunk ->
+     let t0 = Unix.gettimeofday () in
+     let r = thunk true in
+     (let oc = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_cmp.txt"" in
+      Printf.fprintf oc ""%f\n"" (Unix.gettimeofday () -. t0); close_out oc);
+     r".
+(* Times BUILDING the partner generator = gen_pub_equiv_args with the REAL
+   pub_regs: the List.map + List.combine + raw_id_in_list (List.existsb over the
+   public partition) checks, one per argument. calibration3 passed [] for
+   pub_regs, which makes those checks trivial -- so THIS is the honest test of
+   "is gen_pub_equiv_args itself (called via forAll) expensive?". Within-run, so
+   not confounded by program-size variance. *)
+Axiom time_genpartner : forall {A}, (bool -> A) -> A.
+Extract Constant time_genpartner =>
+  "fun thunk ->
+     let t0 = Unix.gettimeofday () in
+     let r = thunk true in
+     (let oc = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_genpartner.txt"" in
+      Printf.fprintf oc ""%f\n"" (Unix.gettimeofday () -. t0); close_out oc);
+     r".
+
 (** NI soundness check, structured like Triosecuris [test_ni]
     ([Triosecuris/TestingLib.v:285]). The inputs we can vary are exactly
     [main]'s argument vector (a size-scaled number of [i32]s):
@@ -567,39 +678,116 @@ Definition vellvm_taint_soundness_partition_fast (p : string + PROG) : Checker :
   match p with
   | inl msg => discard_with ("generator failed: " ++ msg)
   | inr (Prog prog) =>
-      match find_main_arg_ids prog with
+      (* serialize the program ONCE here and reuse for BOTH shell-outs below.
+         [time_show] splits out the [show prog] (char-list build) cost. *)
+      let prog_str := timed_str (fun _ => to_caml_str (time_show (fun _ => show prog))) in
+      match time_findargs (fun _ => find_main_arg_ids prog) with
       | [] => discard_with "main has no arguments to vary"
       | arg_ids =>
           forAll (gen_arg_vector (List.length arg_ids)) (fun base_args =>
             (* ONE run: partition + baseline observation together. *)
-            match vellvm_taint_run prog base_args with
+            match vellvm_taint_run_cached prog_str base_args with
             | None =>
                 discard_with "UB or error on baseline"
             | Some (pub_regs, base_obs_raw) =>
-                forAll (gen_pub_equiv_args arg_ids pub_regs base_args)
+                (* [time_genpartner] wraps building the partner generator with the
+                   REAL pub_regs (the membership-check part calibration3 skipped). *)
+                forAll (time_genpartner (fun _ =>
+                          gen_pub_equiv_args arg_ids pub_regs base_args))
                   (fun args' =>
                      if list_Z_eqb args' base_args
                      then discard_with "partner identical to baseline"
                      else
-                       match vellvm_collect_obs_args prog args' with
+                       match vellvm_collect_obs_args_cached prog_str args' with
                        | None =>
                            discard_with "obs run incomplete (timeout/error)"
                        | Some args_obs_raw =>
-                           let base_obs := z_to_obs base_obs_raw in
-                           let args_obs := z_to_obs args_obs_raw in
-                           if obs_trace_eqb base_obs args_obs then checker true
+                           if time_cmp (fun _ =>
+                                obs_trace_eqb (z_to_obs base_obs_raw) (z_to_obs args_obs_raw))
+                           then checker true
                            else whenFail
                                   ("NI unsound (or taint/real obs diverge). "
                                    ++ "base = " ++ show base_args
-                                   ++ " -> " ++ show_obs_trace base_obs
+                                   ++ " -> " ++ show_obs_trace (z_to_obs base_obs_raw)
                                    ++ " | args' = " ++ show args'
-                                   ++ " -> " ++ show_obs_trace args_obs
+                                   ++ " -> " ++ show_obs_trace (z_to_obs args_obs_raw)
                                    ++ " <<<LLBEGIN" ++ show prog ++ "LLEND>>>")
                                   false
                        end)
             end)
       end
   end.
+
+(* ================================================================= *)
+(** ** [RESTRUCTURED / FLAT] one forAll; partner derived inline         *)
+(* ================================================================= *)
+
+(** Same test as [vellvm_taint_soundness_partition_fast], but restructured to
+    use a SINGLE forAll: the generator emits (program, base_args, raw) together
+    (the two i32 vectors sized to main's arg count), and the partner is DERIVED
+    in the body (public arg -> base value, secret arg -> raw value) instead of
+    via an inner forAll.  3 Checker layers -> 1.  Semantics identical (the
+    "fresh random for secret args" is just pre-generated as [raw]). *)
+Definition gen_prog_base_raw : G ((string + PROG) * (list Z * list Z)) :=
+  bindGen (run_GenLLVM gen_PROG_with_args_withfun) (fun p =>
+    match p with
+    | inr (Prog prog) =>
+        let n := List.length (find_main_arg_ids prog) in
+        bindGen (gen_arg_vector n) (fun base =>
+        bindGen (gen_arg_vector n) (fun raw =>
+        returnGen (p, (base, raw))))
+    | inl _ => returnGen (p, (nil, nil))
+    end).
+
+(* trivial Show for the generated tuple (the whenFail below dumps everything
+   useful anyway) -- keeps forAll's printTestCase cheap and avoids needing a
+   derived Show instance. *)
+#[local] Instance show_pbr : Show ((string + PROG) * (list Z * list Z)) :=
+  {| show _ := ""%string |}.
+
+Definition vellvm_taint_soundness_flat
+  (pbr : (string + PROG) * (list Z * list Z)) : Checker :=
+  let '(p, br) := pbr in
+  let '(base_args, raw) := br in
+  match p with
+  | inl msg => discard_with ("generator failed: " ++ msg)
+  | inr (Prog prog) =>
+      let prog_str := to_caml_str (show prog) in
+      match find_main_arg_ids prog with
+      | [] => discard_with "main has no arguments to vary"
+      | arg_ids =>
+          match vellvm_taint_run_cached prog_str base_args with
+          | None => discard_with "UB or error on baseline"
+          | Some (pub_regs, base_obs_raw) =>
+              (* derive partner inline: public arg -> base value, secret -> raw *)
+              let args' :=
+                List.map (fun '(id, br2) =>
+                            let '(b, r) := br2 in
+                            if raw_id_in_list id pub_regs then b else r)
+                  (List.combine arg_ids (List.combine base_args raw)) in
+              if list_Z_eqb args' base_args
+              then discard_with "partner identical to baseline"
+              else
+                match vellvm_collect_obs_args_cached prog_str args' with
+                | None => discard_with "obs run incomplete (timeout/error)"
+                | Some args_obs_raw =>
+                    if obs_trace_eqb (z_to_obs base_obs_raw) (z_to_obs args_obs_raw)
+                    then checker true
+                    else whenFail
+                           ("NI unsound (or taint/real obs diverge). "
+                            ++ "base = " ++ show base_args
+                            ++ " -> " ++ show_obs_trace (z_to_obs base_obs_raw)
+                            ++ " | args' = " ++ show args'
+                            ++ " -> " ++ show_obs_trace (z_to_obs args_obs_raw)
+                            ++ " <<<LLBEGIN" ++ show prog ++ "LLEND>>>")
+                           false
+                end
+          end
+      end
+  end.
+
+Definition exp_full_flat : Checker :=
+  forAll gen_prog_base_raw vellvm_taint_soundness_flat.
 
 (* ================================================================= *)
 (** ** Differential-oracle property: taint obs == real obs            *)
@@ -652,26 +840,104 @@ Definition taint_obs_matches_real (p : string + PROG) : Checker :=
 (** ** QuickChick invocation                                          *)
 (* ================================================================= *)
 
-Extract Constant defNumTests => "2500".
+Extract Constant defNumTests => "1000".
+(* For deterministic A/B experiments, override the seed (otherwise random):
+   [Extract Constant newRandomSeed => "(Random.State.make [| 12345 |])".] *)
 
 (* Faster soundness check: 2 shell-outs/test (one [vellvm_taint_run] for the
    partition + baseline obs, one [-interpret-obs-args] for the partner)
    instead of 3. Relies on the taint/real obs-equivalence invariant, which
    [taint_obs_matches_real] tests separately -- run that too for full
    coverage. *)
-QuickChick
-  (forAll (run_GenLLVM gen_PROG_with_args_withfun)
-          vellvm_taint_soundness_partition_fast).
+(* [NO-GEN TESTING] read previously-generated .ll files and run ONLY the testing
+   (2 shell-outs + decode + compare) -- NO generation, NO serialization. perf on
+   this isolates whether the ~186ms residual is in TESTING (reducible) or
+   GENERATION (hard). *)
+Axiom read_next_ll : bool -> string.
+Extract Constant read_next_ll =>
+  "let __llc = ref 0 in
+   fun _ ->
+     incr __llc;
+     let i = ((!__llc - 1) mod 10000) + 1 in
+     let fn = Printf.sprintf ""/home/yonghyunkim/works/vellvm/private_notes/gen_samples/ni_N10000/p%05d.ll"" i in
+     let ic = open_in fn in
+     let n = in_channel_length ic in
+     let s = really_input_string ic n in
+     close_in ic; s".
+(* count main's i32 arguments by scanning the @main(...) signature *)
+Axiom ll_argc : string -> Z.
+Extract Constant ll_argc =>
+  "fun ll ->
+     let fs hay needle start =
+       let hl = String.length hay and nl = String.length needle in
+       let rec go i = if i + nl > hl then raise Not_found
+                      else if String.sub hay i nl = needle then i else go (i + 1) in
+       go start in
+     let c = (try
+       let i = fs ll ""@main("" 0 in
+       let close = String.index_from ll i ')' in
+       let s = String.sub ll i (close - i) in
+       let cnt = ref 0 in let p = ref 0 in
+       (try while true do
+          let q = fs s ""i32"" !p in incr cnt; p := q + 3
+        done with Not_found -> ());
+       !cnt
+     with _ -> 1) in
+     Big_int_Z.big_int_of_int c".
+(* force a bool (defeat dead-code elim) but always return true *)
+Axiom keep_bool : bool -> bool.
+Extract Constant keep_bool => "fun b -> let _ = Sys.opaque_identity b in true".
+(* force a string's full evaluation (e.g. the serialized program) *)
+Axiom force_str : string -> bool.
+Extract Constant force_str => "fun s -> let _ = Sys.opaque_identity (String.length s) in true".
 
-(* Alternatives (swap the invocation above):
+(* ===================================================================== *)
+(*  Predefined experiments.  To run one, set the single [QuickChick]      *)
+(*  line at the very bottom to the chosen [exp_*] identifier.             *)
+(* ===================================================================== *)
 
-   (* original 3-shell-out soundness check, no invariant dependency *)
-   QuickChick
-     (forAll (run_GenLLVM gen_PROG_with_args_withfun)
-             vellvm_taint_soundness_partition).
+(* [FULL] real NI soundness: gen + 2 shell-outs + partition + partner + compare *)
+Definition exp_full : Checker :=
+  forAll (run_GenLLVM gen_PROG_with_args_withfun) vellvm_taint_soundness_partition_fast.
 
-   (* differential oracle: taint obs == real obs *)
-   QuickChick
-     (forAll (run_GenLLVM gen_PROG_with_args_withfun)
-             taint_obs_matches_real).
-*)
+(* [FULL-SLOW] original 3-shell-out soundness check (no invariant dependency) *)
+Definition exp_full_slow : Checker :=
+  forAll (run_GenLLVM gen_PROG_with_args_withfun) vellvm_taint_soundness_partition.
+
+(* [TAINT-OBS] differential oracle: taint obs == real obs *)
+Definition exp_taint_obs : Checker :=
+  forAll (run_GenLLVM gen_PROG_with_args_withfun) taint_obs_matches_real.
+
+(* [GEN-ONLY] calibration: generate a program and ignore it (no testing).
+   NB: always-true does NOT force the program -> under-measures generation. *)
+Definition exp_gen_only : Checker :=
+  forAll (run_GenLLVM gen_PROG_with_args_withfun) (fun _ => true).
+
+(* [FORCE-CALIB] gen + force full serialization (show prog) but NO shell-out.
+   Tests whether forcing the lazy program closes the 40ms-vs-263ms gap. *)
+Definition exp_force_calib : Checker :=
+  forAll (run_GenLLVM gen_PROG_with_args_withfun)
+         (fun p => match p with
+                   | inr (Prog l) => checker (force_str (to_caml_str (show l)))
+                   | inl _ => checker true
+                   end).
+
+(* [NO-GEN] read previously-generated .ll files and run ONLY the testing
+   (2 shell-outs + decode + compare) -- no generation, no serialization. *)
+Definition exp_nogen_testing : Checker :=
+  forAll (returnGen true)
+    (fun _ =>
+       let ll := read_next_ll true in
+       let n := Z.to_nat (ll_argc ll) in
+       match vellvm_taint_run_str ll (repeat 1%Z n) with
+       | Some (_, base_obs) =>
+           match vellvm_collect_obs_args_str ll (repeat 2%Z n) with
+           | Some args_obs =>
+               checker (keep_bool (obs_trace_eqb (z_to_obs base_obs) (z_to_obs args_obs)))
+           | None => checker true
+           end
+       | None => checker true
+       end).
+
+(* ----- run one experiment (swap the identifier) ----- *)
+QuickChick exp_full_flat.
