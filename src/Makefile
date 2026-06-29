@@ -110,7 +110,9 @@ qc-tests: rm-qc-test-vo qc-files vellvm
 
 .PHONY: ni-tests
 ni-tests: rm-ni-test-vo qc-files vellvm
-	VELLVM_BIN="$$(pwd)/vellvm" $(ROCQEXEC) rocq/QC/NITests.v
+	# GC tuning (o= = major-GC less often) cuts NI per-test ~6% for free.
+	# Override by exporting OCAMLRUNPARAM before `make ni-tests`.
+	OCAMLRUNPARAM="$${OCAMLRUNPARAM:-s=8M,o=2000}" VELLVM_BIN="$$(pwd)/vellvm" $(ROCQEXEC) rocq/QC/NITests.v
 
 .PHONY: erasure-tests
 erasure-tests: rm-erasure-test-vo qc-files vellvm

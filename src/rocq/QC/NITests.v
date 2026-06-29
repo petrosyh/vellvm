@@ -997,4 +997,4 @@ Definition exp_force_calib_flat : Checker :=
     end).
 
 (* ----- run one experiment (swap the identifier) ----- *)
-QuickChick exp_force_calib_flat.
+QuickChick exp_full.

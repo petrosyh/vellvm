@@ -51,7 +51,7 @@ echo "=================================================================="
 
 pids=()
 for i in $(seq 1 "$NPROC"); do
-  VELLVM_BIN="$VELLVM" rocq top -q -w none -R rocq Vellvm -R ml/extracted Extract \
+  OCAMLRUNPARAM="${OCAMLRUNPARAM:-s=8M,o=2000}" VELLVM_BIN="$VELLVM" rocq top -q -w none -R rocq Vellvm -R ml/extracted Extract \
     -batch -load-vernac-source "$NIT" > "$OUTDIR/run_$i.log" 2>&1 &
   pids+=("$!")
   echo "  launched run_$i (pid $!)"
