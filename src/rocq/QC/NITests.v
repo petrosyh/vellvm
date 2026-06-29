@@ -452,7 +452,47 @@ Extract Constant vellvm_taint_run_str =>
      (* [TIMER B end] write stdout-parse duration. → /tmp/ni_taint_parse.txt *)
      (let __oc2 = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_taint_parse.txt"" in
       Printf.fprintf __oc2 ""%f\n"" (Unix.gettimeofday () -. __tp); close_out __oc2);
-     if !saw_obs_end then Some (List.rev !regs, List.rev !obs) else None".
+     if !saw_obs_end then Some (List.rev !regs, List.rev !obs)
+     else begin
+       (* [Phase 0 measurement] Classify a REJECTED baseline run by UB type. No
+          ---OBS_TRACE_END--- was emitted, so the program did not finish: undefined
+          behaviour, timeout, OOM, or error. We scan the captured output, which
+          carries the Coq UB string (printed by print_msg = print_string at the
+          ThrowUB raise site, LLVMEvents.v:83) plus the driver Program-error line.
+          WHY each bucket:
+          - an Undefined-Behavior line means the interpreter triggered ThrowUB (an
+            undefined-behaviour event) => it IS UB. Sub-typed from the message:
+              * div0     : divisor 0 / overflow on sdiv/udiv/srem/urem
+                           (.. division by 0 . / .. mod 0 . / .. division overflow .)
+              * oob      : a load/store/GEP hit unallocated or invalid-provenance
+                           memory (.. unallocated memory . / .. invalid provenance /
+                           .. that isn t an address .)
+              * other-ub : an Undefined-Behavior line matching neither.
+          - Out Of Memory => oom ; Failed => failed (interpreter errors, NOT UB).
+          - none of the above with no END marker => killed by the wrapping
+            `timeout 5` => timeout (NOT UB).
+          One line per rejected baseline run -> /tmp/ni_ub_reject.txt. *)
+       let has sub =
+         List.exists (fun line ->
+           let ls = String.length line and ss = String.length sub in
+           let rec go i = i + ss <= ls && (String.sub line i ss = sub || go (i + 1)) in
+           ss <= ls && go 0) lines in
+       let cls =
+         if has ""Undefined Behavior"" then
+           (if has ""division by 0"" || has ""mod 0"" || has ""division overflow""
+            then ""div0""
+            else if has ""unallocated memory"" || has ""invalid provenance""
+                    || has ""isn't an address""
+            then ""oob""
+            else ""other-ub"")
+         else if has ""Out Of Memory"" then ""oom""
+         else if has ""Failed"" then ""failed""
+         else if has ""Uninterpreted"" then ""uninterp""
+         else ""timeout"" in
+       (let __u = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_ub_reject.txt"" in
+        output_string __u cls; output_string __u ""\n""; close_out __u);
+       None
+     end".
 
 Definition vellvm_taint_run
   (prog : list (toplevel_entity typ (block typ * list (block typ))))
