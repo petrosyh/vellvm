@@ -219,6 +219,21 @@ Section GenerationState.
     ; context : ContextMetadata s
     ; global_memo : list (global typ)
     ; debug_stack : list string
+    (* [route-A storage] arg-provenance maps for densifying killer programs.
+       Detailed explanation (KO): private_notes/ROUTE_A_IMPL.private.md  §1-storage.
+       arg_set : entity-id (Z) -> bitmask N. Bit i set <-> this value MAY depend on main
+         arg #i (args {0..7}). N.lor = propagation (result = OR of operand masks);
+         (N <> 0) <-> tainted; (N.land a b = a) <-> a subset-of b  (operand-diversity check).
+         Covers SSA variables AND memory cells (a cell's arg_set = its content provenance),
+         so no separate cell_content map.
+       points_to : pointer-holder entity -> the cell entity it addresses (shadow memory).
+         Now populated variable->cell; later cell->cell (pointer-in-memory, pointer cluster). *)
+    ; arg_set : IM.Raw.t N
+    ; points_to : IM.Raw.t Z
+    (* [route-A propagation] transient side-channel accumulator: OR of the masks of the
+       values picked as operands since the last result-binding. Assigned to the new result
+       at add_to_local_ctx, then reset to 0. See ROUTE_A_IMPL.private.md §2-propagation. *)
+    ; cur_mask : N
     }.
 
   Instance Default_GenState {s} : Default (GenState s)
@@ -230,6 +245,9 @@ Section GenerationState.
              ; context := def
              ; global_memo := []
              ; debug_stack := []
+             ; arg_set := IM.Raw.empty _   (* [route-A storage] empty provenance; see ROUTE_A_IMPL §1-storage *)
+             ; points_to := IM.Raw.empty _
+             ; cur_mask := 0               (* [route-A propagation] *)
              |}
     }.
 
@@ -245,6 +263,9 @@ Section GenerationState.
         | apply (context s)
         | apply (global_memo s)
         | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
         ]; apply gs.
     - apply num_void.
   Defined.
@@ -261,6 +282,9 @@ Section GenerationState.
         | apply (context s)
         | apply (global_memo s)
         | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
         ]; apply gs.
     - apply num_raw.
   Defined.
@@ -277,6 +301,9 @@ Section GenerationState.
         | apply (context s)
         | apply (global_memo s)
         | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
         ]; apply gs.
     - apply num_global.
   Defined.
@@ -293,6 +320,9 @@ Section GenerationState.
         | apply (context s)
         | apply (global_memo s)
         | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
         ]; apply gs.
     - apply num_blocks.
   Defined.
@@ -309,6 +339,9 @@ Section GenerationState.
         | apply x
         | apply (global_memo s)
         | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
         ]; apply gs.
     - apply context.
   Defined.
@@ -325,6 +358,9 @@ Section GenerationState.
         | apply (context s)
         | apply x
         | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
         ]; apply gs.
     - apply global_memo.
   Defined.
@@ -341,8 +377,70 @@ Section GenerationState.
         | apply (context s)
         | apply (global_memo s)
         | apply x
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
         ]; apply gs.
     - apply debug_stack.
+  Defined.
+
+  (* [route-A storage] lenses for the two provenance maps. See ROUTE_A_IMPL §1-storage. *)
+  Definition arg_set' {s} : Lens' (GenState s) (IM.Raw.t N).
+    red.
+    intros f F afa gs.
+    refine ((fun x => _) <$> afa (_ gs)); try typeclasses eauto.
+    - apply mkGenState;
+        [ apply (num_void s)
+        | apply (num_raw s)
+        | apply (num_global s)
+        | apply (num_blocks s)
+        | apply (context s)
+        | apply (global_memo s)
+        | apply (debug_stack s)
+        | apply x
+        | apply (points_to s)
+        | apply (cur_mask s)
+        ]; apply gs.
+    - apply arg_set.
+  Defined.
+
+  Definition points_to' {s} : Lens' (GenState s) (IM.Raw.t Z).
+    red.
+    intros f F afa gs.
+    refine ((fun x => _) <$> afa (_ gs)); try typeclasses eauto.
+    - apply mkGenState;
+        [ apply (num_void s)
+        | apply (num_raw s)
+        | apply (num_global s)
+        | apply (num_blocks s)
+        | apply (context s)
+        | apply (global_memo s)
+        | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply x
+        | apply (cur_mask s)
+        ]; apply gs.
+    - apply points_to.
+  Defined.
+
+  (* [route-A propagation] lens for the transient accumulator. See ROUTE_A_IMPL §2-propagation. *)
+  Definition cur_mask' {s} : Lens' (GenState s) N.
+    red.
+    intros f F afa gs.
+    refine ((fun x => _) <$> afa (_ gs)); try typeclasses eauto.
+    - apply mkGenState;
+        [ apply (num_void s)
+        | apply (num_raw s)
+        | apply (num_global s)
+        | apply (num_blocks s)
+        | apply (context s)
+        | apply (global_memo s)
+        | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply x
+        ]; apply gs.
+    - apply cur_mask.
   Defined.
 
 
@@ -418,6 +516,40 @@ Section GenerationState.
 
   Definition new_block_id : GenLLVM block_id
     := new_id (@num_blocks') (fun n => Name ("b" ++ show n)).
+
+  (* [route-A propagation] arg-provenance helpers (side-channel accumulator).
+     See ROUTE_A_IMPL.private.md §2-propagation.
+     arg_set : entity-id (Z) -> mask N (bit i <-> main arg #i). cur_mask : transient accum. *)
+  Definition arg_mask_lookup (e : Z) : GenLLVM N
+    := m <- use (metadata .@ arg_set');;
+       ret (match IM.Raw.find e m with
+            | Some v => v
+            | None => 0%N
+            end).
+
+  Definition arg_mask_set (e : Z) (v : N) : GenLLVM unit
+    := m <- use (metadata .@ arg_set');;
+       metadata .@ arg_set' .= IM.Raw.add e v m;;
+       ret tt.
+
+  (* OR the mask of a picked value (entity e) into the accumulator. *)
+  Definition cur_mask_accum (e : Z) : GenLLVM unit
+    := v <- arg_mask_lookup e;;
+       c <- use (metadata .@ cur_mask');;
+       metadata .@ cur_mask' .= N.lor c v;;
+       ret tt.
+
+  (* Read the accumulator and reset it to 0 (called when binding a result). *)
+  Definition cur_mask_take : GenLLVM N
+    := c <- use (metadata .@ cur_mask');;
+       metadata .@ cur_mask' .= 0%N;;
+       ret c.
+
+  (* [route-A bias] soft preference weight for tainted (arg-derived) operands.
+     The tainted-filtered pick is kept with probability w/(w+1); an untainted value
+     stays reachable at 1/(w+1). w = 0 => ORIGINAL selection (bias OFF, semantics-
+     preserving). Knob — tune against the 4 metrics. See ROUTE_A_IMPL §3-bias. *)
+  Definition route_a_bias_w : nat := 3.
 
   (* #[global] Instance STGST : Monad (stateT GenState G). *)
   (* apply Monad_stateT. *)
@@ -1074,6 +1206,10 @@ Section TypGenerators.
        (* Default to deterministic *)
        (gen_context' .@ entl e .@ deterministic') .= true;;
        set_typ_metadata e t;;
+       (* [route-A propagation] assign the accumulated operand-mask to this new result,
+          then reset the accumulator for the next instruction. See ROUTE_A_IMPL §2. *)
+       m <- cur_mask_take;;
+       arg_mask_set (unEnt e) m;;
        ret e.
 
   Definition genLocalEnt (τ : typ) : GenLLVM (ident * Ent)
@@ -2070,7 +2206,39 @@ Section ExpGenerators.
   Definition gen_var_ent {a b}
     (focus : Lens' (SystemState GenState G) (IM.Raw.t a)) (filter : GenQuery b) : GenLLVM (option Ent)
     := focused <- use focus;;
-       gen_IntMapRaw_ent_filter focused filter.
+       (* [route-A bias] soft-prefer tainted (arg-derived) candidates. See ROUTE_A_IMPL §3-bias.
+          Build the tainted subset (arg_set != 0) of the candidates, pick from it, and keep
+          that pick with prob w/(w+1); otherwise fall back to the original unbiased pick (so
+          untainted values stay reachable). w = 0 => original selection (bias off). The bias is
+          inert where no candidate is tainted (tainted subset empty -> unbiased), so it only
+          affects value-operand selection, not type/global lookups. *)
+       oe <- (if Nat.eqb route_a_bias_w 0
+              then gen_IntMapRaw_ent_filter focused filter
+              else
+                argmap <- use (metadata .@ arg_set');;
+                let tainted :=
+                  IM.Raw.fold
+                    (fun (k : Z) v acc =>
+                       match IM.Raw.find k argmap with
+                       | Some m => if N.eqb m 0%N then acc else IM.Raw.add k v acc
+                       | None => acc
+                       end) focused (IM.Raw.empty _) in
+                oe_t <- gen_IntMapRaw_ent_filter tainted filter;;
+                match oe_t with
+                | Some _ =>
+                    b <- lift (choose (0%nat, route_a_bias_w));;
+                    if Nat.eqb b 0%nat
+                    then gen_IntMapRaw_ent_filter focused filter
+                    else ret oe_t
+                | None => gen_IntMapRaw_ent_filter focused filter
+                end);;
+       (* [route-A propagation] the picked value becomes an operand -> OR its mask into the
+          side-channel accumulator. See ROUTE_A_IMPL §2. *)
+       (match oe with
+        | Some e => cur_mask_accum (unEnt e)
+        | None => ret tt
+        end);;
+       ret oe.
 
   Definition gen_var_ident {a b}
     (focus : Lens' (SystemState GenState G) (IM.Raw.t a)) (filter : GenQuery b) : GenLLVM (option ident)
@@ -2288,7 +2456,10 @@ Section ExpGenerators.
   with
   gen_icmp_exp_typ (gen_global_of_typ : typ -> GenLLVM (option ident)) (gen_ident_of_typ : typ -> GenLLVM (option ident)) (t : typ) {struct t} : GenLLVM (exp typ)
   := cmp <- lift gen_icmp;;
-     ret (OP_ICmp cmp) <*> ret t <*> gen_exp_size' gen_global_of_typ gen_ident_of_typ 0%nat t <*> gen_non_zero_exp_size 0%nat t
+     (* [Phase 1a] icmp v2: const(non-zero) -> SSA-allowing gen_exp_size' so v2 can
+        carry arg taint (icmp never traps; the non-zero constraint was spurious,
+        copied from the div generator). Litmus for the "i32 pool already tainted" claim. *)
+     ret (OP_ICmp cmp) <*> ret t <*> gen_exp_size' gen_global_of_typ gen_ident_of_typ 0%nat t <*> gen_exp_size' gen_global_of_typ gen_ident_of_typ 0%nat t
   with
   gen_fcmp_exp_typ (gen_global_of_typ : typ -> GenLLVM (option ident)) (gen_ident_of_typ : typ -> GenLLVM (option ident)) (t : typ) {struct t} : GenLLVM (exp typ)
   := cmp <- lift gen_fcmp;;
@@ -2546,8 +2717,15 @@ Section InstrGenerators.
        ntagg <- normalize_type_GenLLVM tagg;;
        paths_in_agg <- get_index_paths_insertvalue ntagg;;
        '(tsub, path_for_insertvalue) <- elems_LLVM paths_in_agg;;
-       (* GC: THIS IS FALSE and will cause trouble because maybe the type we want is not in the context!!! NEED TO CHANGE TO SOMETHING ELSE*)
-       esub <- hide_ctx (gen_exp_sz0 tsub);;
+       (* [Phase 1 channel-open] Was [hide_ctx (gen_exp_sz0 tsub)]: hide_ctx hid ALL locals,
+          so the inserted element could only be a global/constant -> the aggregate could NEVER
+          carry arg taint (agg-struct/array, extractval, insertval-elt/vec mutants all survived,
+          "arg-unreachable"). Drop hide_ctx so an in-scope (arg-tainted) i32 local can be
+          inserted; gen_exp_sz0 still falls back to a literal when no local of type tsub is in
+          scope, so the old "type we want may not be in context" concern is handled. The i32
+          pool is already dense-tainted, so this taints whatever aggregate type the generator
+          builds (type-adaptive). No UB (insertvalue is total). *)
+       esub <- gen_exp_sz0 tsub;;
        (* Generate all of the type*)
        id <- genInstrId tagg;;
        ret (id, INSTR_Op (OP_InsertValue (tagg, eagg) (tsub, esub) path_for_insertvalue))).
@@ -3022,7 +3200,11 @@ Section InstrGenerators.
    *)
   Definition gen_instr : GenLLVM (list (instr_id * instr typ)) :=
     annotate "gen_instr"
-      (ointtoptr_info <- gen_inttoptr_info;;
+      (* [route-A propagation] reset the accumulator at each instruction boundary so a leaked
+         mask from a preceding void instruction (e.g. store, which picks a value but binds no
+         result) cannot bleed into this instruction's result. No randomness consumed. See §2. *)
+      (_ <- cur_mask_take;;
+       ointtoptr_info <- gen_inttoptr_info;;
        osized_ptr_typ <- gen_sized_ptr_type;;
        ovalid_ptr_vecptr <- gen_valid_ptr_vecptr_ent;;
        oagg_typ <- gen_indexable_type;;
@@ -3256,12 +3438,49 @@ Section InstrGenerators.
        | Anon _
        | Raw _ => false
        end.
+
+  (* [route-A #2' arg-type routing] Convert each of main's (i32) args to a DISTINCT scalar type
+     so that tainted values of several types EXIST in scope -- the operand-bias then has diverse
+     tainted candidates to prefer (the measured bottleneck: arg=i32 but 83% of operands are
+     non-i32, so the bias was starved). Generator-only synthesis of #3's benefit, spread one
+     conversion per arg (less form-constraining than clustering 6 on one arg). The result %c is
+     added to the ctx with arg #i's mask (2^i) since it is built manually (not via gen_var_ent).
+     STOPGAP for #3-proper (diverse-typed args + vellvm binding). See ROUTE_A_IMPL §measure+bottleneck. *)
+  Definition gen_arg_type_seed (arg_ents : list (ident * Ent)) : GenLLVM (list (instr_id * instr typ))
+    := let cycle : list (typ * conversion_type) :=
+         [ (TYPE_I 8, Trunc); (TYPE_I 16, Trunc); (TYPE_I 64, Sext); (TYPE_I 1, Trunc); (TYPE_Float, Sitofp) ] in
+       let mk (p : nat * (ident * Ent)) : GenLLVM (list (instr_id * instr typ)) :=
+         let '(i, ie) := p in
+         let '(aid, _ae) := ie in
+         match List.nth_error cycle (Nat.modulo i 5) with
+         | None => ret []
+         | Some te =>
+             let '(tgt, conv) := te in
+             '(cid, ce) <- genInstrIdEnt tgt;;
+             arg_mask_set (unEnt ce) (N.shiftl 1 (N.of_nat i));;
+             ret [(cid, INSTR_Op (OP_Conversion conv (TYPE_I 32) (EXP_Ident aid) tgt))]
+         end in
+       seeds <- map_monad mk (List.combine (List.seq 0 (List.length arg_ents)) arg_ents);;
+       ret (List.concat seeds).
   (* Don't want to generate CFGs, actually. Want to generated TLEs *)
 
   Definition gen_definition_h (name : global_id) (ret_t : typ) (args_t : list typ) : GenLLVM (definition typ (block typ * list (block typ)))
     :=
     (* Generate argument variables *)
-    args <- map_monad genLocal args_t;;
+    arg_ents <- map_monad genLocalEnt args_t;;
+    (* [route-A propagation] SEED: main's args ARE the taint sources -> arg #i gets bit i (2^i).
+       Helper-function args are NOT taint sources, so gate on is_main. See ROUTE_A_IMPL §2. *)
+    (if is_main name
+     then (_ <- map_monad (fun p => let '(i, ie) := p in
+                                    let '(_, e) := ie in
+                                    arg_mask_set (unEnt e) (N.shiftl 1 (N.of_nat i)))
+                          (List.combine (List.seq 0 (List.length arg_ents)) arg_ents);;
+           ret tt)
+     else ret tt);;
+    (* [route-A #2' arg-type routing] for main, build one conversion per arg to a distinct scalar
+       type (adds %c to the ctx so gen_blocks can pick them); the instrs are prepended below. *)
+    seed_convs <- (if is_main name then gen_arg_type_seed arg_ents else ret []);;
+    let args := map fst arg_ents in
     let f_type := TYPE_Function ret_t args_t false in
     let param_attr_slots := map (fun t => []) args in
     let prototype :=
@@ -3272,7 +3491,19 @@ Section InstrGenerators.
     in
 
     bs <- gen_blocks ret_t;;
-    ret (mk_definition (block typ * list (block typ)) prototype (map ident_to_raw_id args) bs).
+    (* [route-A #2'] prepend the arg-type conversions to main's entry block so the seeded
+       tainted values (already in the ctx above) are actually defined at the top of main. *)
+    let bs' := match seed_convs with
+               | [] => bs
+               | _ :: _ =>
+                   let '(entry, rest) := bs in
+                   ({| blk_id       := blk_id entry
+                     ; blk_phis     := blk_phis entry
+                     ; blk_code     := (seed_convs ++ blk_code entry)%list
+                     ; blk_term     := blk_term entry
+                     ; blk_comments := blk_comments entry |}, rest)
+               end in
+    ret (mk_definition (block typ * list (block typ)) prototype (map ident_to_raw_id args) bs').
 
 
   Definition gen_definition (name : global_id) (ret_t : typ) (args : list typ) : GenLLVM (definition typ (block typ * list (block typ)))
@@ -3370,7 +3601,9 @@ Section InstrGenerators.
       the count grows with the QuickChick size parameter. Change [S sz] to
       tune the upper bound. *)
   Definition gen_main_with_args_n : GenLLVM (definition typ (block typ * list (block typ)))
-    := n <- sized_LLVM (fun sz => lift (choose (1%nat, S sz)));;
+    := (* [route-A #2'] min 5 args so the arg-type-routing (gen_arg_type_seed) covers all 5 cycle
+          scalar types (i8/i16/i64/i1/float) + i32 (the args themselves). *)
+       n <- sized_LLVM (fun sz => lift (choose (5%nat, (5 + sz)%nat)));;
        let args := List.repeat (TYPE_I 32) n in
        gen_definition (Name "main") (TYPE_I 8) args.
 
