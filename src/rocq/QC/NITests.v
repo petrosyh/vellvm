@@ -886,8 +886,10 @@ Definition taint_obs_matches_real (p : string + PROG) : Checker :=
 (* ================================================================= *)
 
 Extract Constant defNumTests => "1000".
-(* FIXED seed for before/after A/B (remove for random runs): *)
-Extract Constant newRandomSeed => "(Random.State.make [| 12345 |])".
+(* [working toggle] seed: UNFIXED for mutation/campaign runs (parallel workers must
+   explore different programs). For seed-fixed A/B measurements, UNCOMMENT the line
+   below (fixed seed 12345). *)
+(* Extract Constant newRandomSeed => "(Random.State.make [| 12345 |])". *)
 
 (* Faster soundness check: 2 shell-outs/test (one [vellvm_taint_run] for the
    partition + baseline obs, one [-interpret-obs-args] for the partner)
