@@ -234,6 +234,23 @@ Section GenerationState.
        values picked as operands since the last result-binding. Assigned to the new result
        at add_to_local_ctx, then reset to 0. See ROUTE_A_IMPL.private.md §2-propagation. *)
     ; cur_mask : N
+    (* [route-A chain-vector] vector-lane provenance for insert->extract chaining.
+       vec_lanes : vector entity -> [(lane, mask)]: lanes whose CURRENT content is likely
+         arg-derived. Recorded at insertelement (the result inherits the source vector's
+         recorded lanes; the written lane is overwritten by the inserted element's mask).
+         Consumed by gen_extractelement to soft-bias the lane pick toward a tainted lane
+         of the SAME vector — a kill needs the REAL dataflow (insert lane = extract lane),
+         not just a tainted-labelled vector; uniform lane matching is ~1/sz.
+       cur_ent : transient side-channel: entity of the LAST gen_var_ent pick. Lets a
+         generator learn WHICH entity an operand expression resolved to (the exp itself
+         only carries the NAME; there is no name->entity reverse index — same obstacle
+         as §2-propagation, same interception answer). Cleared at instruction boundaries;
+         read-and-cleared by cur_ent_take. Misattribution is possible (e.g. a literal
+         vector whose nested element pick was the last gen_var_ent call) — harmless:
+         wrong entries never type-match a later lookup, costing only sampling efficiency.
+       See ROUTE_A_IMPL.private.md §4-chain-vector. *)
+    ; vec_lanes : IM.Raw.t (list (Z * N))
+    ; cur_ent : option Z
     }.
 
   Instance Default_GenState {s} : Default (GenState s)
@@ -248,6 +265,8 @@ Section GenerationState.
              ; arg_set := IM.Raw.empty _   (* [route-A storage] empty provenance; see ROUTE_A_IMPL §1-storage *)
              ; points_to := IM.Raw.empty _
              ; cur_mask := 0               (* [route-A propagation] *)
+             ; vec_lanes := IM.Raw.empty _ (* [route-A chain-vector] *)
+             ; cur_ent := None             (* [route-A chain-vector] *)
              |}
     }.
 
@@ -266,6 +285,8 @@ Section GenerationState.
         | apply (arg_set s)
         | apply (points_to s)
         | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
         ]; apply gs.
     - apply num_void.
   Defined.
@@ -285,6 +306,8 @@ Section GenerationState.
         | apply (arg_set s)
         | apply (points_to s)
         | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
         ]; apply gs.
     - apply num_raw.
   Defined.
@@ -304,6 +327,8 @@ Section GenerationState.
         | apply (arg_set s)
         | apply (points_to s)
         | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
         ]; apply gs.
     - apply num_global.
   Defined.
@@ -323,6 +348,8 @@ Section GenerationState.
         | apply (arg_set s)
         | apply (points_to s)
         | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
         ]; apply gs.
     - apply num_blocks.
   Defined.
@@ -342,6 +369,8 @@ Section GenerationState.
         | apply (arg_set s)
         | apply (points_to s)
         | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
         ]; apply gs.
     - apply context.
   Defined.
@@ -361,6 +390,8 @@ Section GenerationState.
         | apply (arg_set s)
         | apply (points_to s)
         | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
         ]; apply gs.
     - apply global_memo.
   Defined.
@@ -380,6 +411,8 @@ Section GenerationState.
         | apply (arg_set s)
         | apply (points_to s)
         | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
         ]; apply gs.
     - apply debug_stack.
   Defined.
@@ -400,6 +433,8 @@ Section GenerationState.
         | apply x
         | apply (points_to s)
         | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
         ]; apply gs.
     - apply arg_set.
   Defined.
@@ -419,6 +454,8 @@ Section GenerationState.
         | apply (arg_set s)
         | apply x
         | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
         ]; apply gs.
     - apply points_to.
   Defined.
@@ -439,8 +476,54 @@ Section GenerationState.
         | apply (arg_set s)
         | apply (points_to s)
         | apply x
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
         ]; apply gs.
     - apply cur_mask.
+  Defined.
+
+  (* [route-A chain-vector] lenses for the vector-lane records and the last-pick
+     side-channel. See ROUTE_A_IMPL §4-chain-vector. *)
+  Definition vec_lanes' {s} : Lens' (GenState s) (IM.Raw.t (list (Z * N))).
+    red.
+    intros f F afa gs.
+    refine ((fun x => _) <$> afa (_ gs)); try typeclasses eauto.
+    - apply mkGenState;
+        [ apply (num_void s)
+        | apply (num_raw s)
+        | apply (num_global s)
+        | apply (num_blocks s)
+        | apply (context s)
+        | apply (global_memo s)
+        | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
+        | apply x
+        | apply (cur_ent s)
+        ]; apply gs.
+    - apply vec_lanes.
+  Defined.
+
+  Definition cur_ent' {s} : Lens' (GenState s) (option Z).
+    red.
+    intros f F afa gs.
+    refine ((fun x => _) <$> afa (_ gs)); try typeclasses eauto.
+    - apply mkGenState;
+        [ apply (num_void s)
+        | apply (num_raw s)
+        | apply (num_global s)
+        | apply (num_blocks s)
+        | apply (context s)
+        | apply (global_memo s)
+        | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply x
+        ]; apply gs.
+    - apply cur_ent.
   Defined.
 
 
@@ -544,6 +627,55 @@ Section GenerationState.
     := c <- use (metadata .@ cur_mask');;
        metadata .@ cur_mask' .= 0%N;;
        ret c.
+
+  (* [route-A chain-vector] helpers. cur_ent = entity of the LAST gen_var_ent pick
+     (the name->entity bridge; same interception idea as cur_mask). vec_lanes =
+     per-vector tainted-lane records. See ROUTE_A_IMPL §4-chain-vector. *)
+  Definition cur_ent_set (e : Z) : GenLLVM unit
+    := _ <- use (metadata .@ cur_ent');;
+       metadata .@ cur_ent' .= (Some e : option Z);;
+       ret tt.
+
+  (* Read the last-picked entity and clear it. Also used as a pre-pick reset, so a
+     stale pick cannot be attributed to the operand about to be generated. *)
+  Definition cur_ent_take : GenLLVM (option Z)
+    := c <- use (metadata .@ cur_ent');;
+       metadata .@ cur_ent' .= (None : option Z);;
+       ret c.
+
+  Definition vec_lanes_find (e : Z) : GenLLVM (list (Z * N))
+    := m <- use (metadata .@ vec_lanes');;
+       ret (match IM.Raw.find e m with
+            | Some l => l
+            | None => []
+            end).
+
+  (* Record the lanes of a NEW vector [e] built by insertelement: inherit the source
+     vector's recorded lanes ([osrc], if the source was an ident pick), then overwrite
+     lane [idx] with the inserted element's mask [m] (m = 0 erases the lane: tainted
+     content was clobbered by an untainted element). No entry is stored when nothing
+     is tainted. *)
+  Definition vec_lanes_update (e : Z) (osrc : option Z) (idx : Z) (m : N) : GenLLVM unit
+    := inherited <- (match osrc with
+                     | Some src => vec_lanes_find src
+                     | None => ret []
+                     end);;
+       let cleared := List.filter (fun '(l, _) => negb (Z.eqb l idx)) inherited in
+       let entry := if N.eqb m 0%N then cleared else ((idx, m) :: cleared) in
+       match entry with
+       | [] => ret tt
+       | _ :: _ =>
+           mm <- use (metadata .@ vec_lanes');;
+           metadata .@ vec_lanes' .= IM.Raw.add e entry mm;;
+           ret tt
+       end.
+
+  (* [route-A chain-vector] soft weight for extractelement's lane pick: read a
+     recorded tainted lane of the picked vector with probability w/(w+1); every lane
+     stays reachable via the uniform fallback. w = 0 => ORIGINAL uniform pick (chain
+     OFF — consumes identical randomness, so the generated stream is unchanged;
+     clean A/B switch). Knob — tune against the 4 metrics. *)
+  Definition route_a_chain_w : nat := 3.
 
   (* [route-A bias] soft preference weight for tainted (arg-derived) operands.
      The tainted-filtered pick is kept with probability w/(w+1); an untainted value
@@ -2233,9 +2365,13 @@ Section ExpGenerators.
                 | None => gen_IntMapRaw_ent_filter focused filter
                 end);;
        (* [route-A propagation] the picked value becomes an operand -> OR its mask into the
-          side-channel accumulator. See ROUTE_A_IMPL §2. *)
+          side-channel accumulator. See ROUTE_A_IMPL §2.
+          [route-A chain-vector] also remember WHICH entity was picked (cur_ent), for
+          generators that need the operand's identity (vector chaining). Pure state ops,
+          no randomness consumed. *)
        (match oe with
-        | Some e => cur_mask_accum (unEnt e)
+        | Some e => cur_mask_accum (unEnt e);;
+                    cur_ent_set (unEnt e)
         | None => ret tt
         end);;
        ret oe.
@@ -2730,23 +2866,56 @@ Section InstrGenerators.
        id <- genInstrId tagg;;
        ret (id, INSTR_Op (OP_InsertValue (tagg, eagg) (tsub, esub) path_for_insertvalue))).
 
+  (* [route-A chain-vector] extractelement's lane pick, chain-aware: if the vector we
+     just picked (ovec, learned via the cur_ent side-channel) has recorded tainted
+     lanes, read ONE OF THOSE lanes with probability w/(w+1) — completing the real
+     dataflow [insertelement lane = extractelement lane] that a kill needs (a uniform
+     pick matches only ~1/sz of the time). Any lane stays reachable via the uniform
+     fallback. w = 0 or no record => exactly the original single [choose] (identical
+     randomness consumed => stream-preserving). See ROUTE_A_IMPL §4-chain-vector. *)
+  Definition gen_chain_lane (ovec : option Z) (sz : N) : GenLLVM Z :=
+    let uniform := lift_GenLLVM (choose (0, Z.of_N sz - 1)%Z) in
+    if Nat.eqb route_a_chain_w 0
+    then uniform
+    else
+      match ovec with
+      | None => uniform
+      | Some ve =>
+          lanes <- vec_lanes_find ve;;
+          match lanes with
+          | [] => uniform
+          | _ :: _ =>
+              b <- lift_GenLLVM (choose (0%nat, route_a_chain_w));;
+              if Nat.eqb b 0%nat
+              then uniform
+              else '(l, _) <- elems_LLVM lanes;; ret l
+          end
+      end.
+
   (* ExtractElement *)
   Definition gen_extractelement (tvec : typ): GenLLVM (instr_id * instr typ) :=
     annotate "gen_extractelement"
-      (evec <- gen_exp_sz0 tvec;;
+      ((* [route-A chain-vector] clear the side-channel so the vector pick below is
+          attributed fresh (a stale entity from an earlier pick must not leak in). *)
+       _ <- cur_ent_take;;
+       evec <- gen_exp_sz0 tvec;;
+       ovec <- cur_ent_take;;   (* entity of the picked vector (None for a literal) *)
        let get_size_ty (vType: typ) :=
          match tvec with
          | TYPE_Vector sz ty => (sz, ty)
          | _ => (0%N, TYPE_Void)
          end in
        let '(sz, t_in_vec) := get_size_ty tvec in
-       index_for_extractelement <- lift_GenLLVM (choose (0, Z.of_N sz - 1)%Z);;
+       index_for_extractelement <- gen_chain_lane ovec sz;;
        id <- genInstrId t_in_vec;;
        ret (id, INSTR_Op (OP_ExtractElement (tvec, evec) (TYPE_I 32, EXP_Integer index_for_extractelement)))).
 
   Definition gen_insertelement (tvec : typ) : GenLLVM (instr_id * instr typ) :=
     annotate "gen_insertelement"
-      (evec <- gen_exp_sz0 tvec;;
+      ((* [route-A chain-vector] see gen_extractelement; here we RECORD instead of read. *)
+       _ <- cur_ent_take;;
+       evec <- gen_exp_sz0 tvec;;
+       ovec <- cur_ent_take;;   (* entity of the source vector (None for a literal) *)
        let get_size_ty (vType: typ) :=
          match tvec with
          | TYPE_Vector sz ty => (sz, ty)
@@ -2754,8 +2923,20 @@ Section InstrGenerators.
          end in
        let '(sz, t_in_vec) := get_size_ty tvec in
        value <- gen_exp_sz0 t_in_vec;;
+       oelt <- cur_ent_take;;   (* entity of the inserted element (None for a literal) *)
+       (* the element's OWN mask (exact for an ident pick; 0 for a literal) — the value
+          this lane will really hold. NB: cur_mask (evec|value accumulated) is NOT used
+          here; it keeps feeding arg_set[result] via add_to_local_ctx as before. *)
+       eltm <- (match oelt with
+                | Some z => arg_mask_lookup z
+                | None => ret 0%N
+                end);;
        index <- lift_GenLLVM (choose (0, Z.of_N (sz - 1)));;
-       id <- genInstrId tvec;;
+       '(id, e) <- genInstrIdEnt tvec;;
+       (* [route-A chain-vector] record: the new vector inherits the source's tainted
+          lanes; lane [index] now holds the element (mask eltm). Consumed by
+          gen_chain_lane. State-only, no randomness. *)
+       vec_lanes_update (unEnt e) ovec index eltm;;
        ret (id, INSTR_Op (OP_InsertElement (tvec, evec) (t_in_vec, value) (TYPE_I 32, EXP_Integer index)))).
 
   Definition round_up_to_eight (n : N) : N :=
@@ -3204,6 +3385,8 @@ Section InstrGenerators.
          mask from a preceding void instruction (e.g. store, which picks a value but binds no
          result) cannot bleed into this instruction's result. No randomness consumed. See §2. *)
       (_ <- cur_mask_take;;
+       (* [route-A chain-vector] same boundary reset for the last-pick side-channel. *)
+       _ <- cur_ent_take;;
        ointtoptr_info <- gen_inttoptr_info;;
        osized_ptr_typ <- gen_sized_ptr_type;;
        ovalid_ptr_vecptr <- gen_valid_ptr_vecptr_ent;;
