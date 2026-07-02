@@ -670,6 +670,50 @@ Section GenerationState.
            ret tt
        end.
 
+  (* [route-A chain-memory] shadow-memory helpers. A CELL = one synthetic entity per
+     memory object (alloca / global), minted BARE (no context registration, no
+     metadata) so cells never appear in candidate folds or queries — writing to them
+     is inert for generation. points_to : pointer entity -> its cell.
+     arg_set[cell] = provenance of the cell's CURRENT content (store OVERWRITES it:
+     object granularity — a multi-slot object is approximated by its last store).
+     See ROUTE_A_IMPL §5-chain-memory. *)
+  Definition points_to_set (p c : Z) : GenLLVM unit
+    := m <- use (metadata .@ points_to');;
+       metadata .@ points_to' .= IM.Raw.add p c m;;
+       ret tt.
+
+  Definition points_to_find (p : Z) : GenLLVM (option Z)
+    := m <- use (metadata .@ points_to');;
+       ret (IM.Raw.find p m).
+
+  (* STORE: the cell addressed by [optr] now holds content with mask [m].
+     No-op when the pointer's cell is unknown (under-approx; bias-only, principle 3). *)
+  Definition cell_mask_record (optr : option Z) (m : N) : GenLLVM unit
+    := match optr with
+       | None => ret tt
+       | Some p =>
+           oc <- points_to_find p;;
+           match oc with
+           | None => ret tt
+           | Some c => arg_mask_set c m
+           end
+       end.
+
+  (* OR a raw mask into the accumulator (LOAD: cell content -> result provenance). *)
+  Definition cur_mask_accum_mask (v : N) : GenLLVM unit
+    := c <- use (metadata .@ cur_mask');;
+       metadata .@ cur_mask' .= N.lor c v;;
+       ret tt.
+
+  (* [route-A chain-memory] soft weight for LOAD's pointer pick: with probability
+     w/(w+1) read through a pointer whose cell currently holds arg-tainted content
+     (completing a store->load same-cell chain). w = 0 => OFF: no candidate scan, no
+     extra randomness, AND load-result mask propagation disabled too — that write
+     feeds arg_set, which the always-on §3 bias READS, so ungated it would shift the
+     stream even at w=0. The cell/points_to RECORDING stays always-on (cells are
+     invisible to candidate folds). Knob — tune against the 4 metrics. *)
+  Definition route_a_mem_w : nat := 3.
+
   (* [route-A chain-vector] soft weight for extractelement's lane pick: read a
      recorded tainted lane of the picked vector with probability w/(w+1); every lane
      stays reachable via the uniform fallback. w = 0 => ORIGINAL uniform pick (chain
@@ -1352,6 +1396,15 @@ Section TypGenerators.
   Definition genLocal (τ : typ) : GenLLVM ident
     :=  fst <$> genLocalEnt τ.
 
+  (* [route-A chain-memory] mint a fresh cell for the memory object named by pointer
+     entity [p]. Bare newEntity: consumes only the entity counter — entity IDs of
+     everything created later SHIFT vs. a build without minting. Analysed harmless
+     (no generation decision reads id VALUES; names come from num_raw) and verified
+     empirically by the w=0 seed-fixed MD5 A/B. *)
+  Definition cell_mint (p : Z) : GenLLVM unit
+    := c <- lift newEntity;;
+       points_to_set p (unEnt c).
+
   Definition add_to_global_ctx (x : (ident * typ)) : GenLLVM Ent
     := let '(n, t) := x in
        e <- lift newEntity;;
@@ -1361,6 +1414,10 @@ Section TypGenerators.
        (* Default to deterministic *)
        (gen_context' .@ entl e .@ deterministic') .= true;;
        set_typ_metadata e t;;
+       (* [route-A chain-memory] a global names a memory object -> give it a cell.
+          Initializers are constants (content mask starts 0); function symbols get a
+          dead cell — harmless. Covers the global-pointer share of load/store traffic. *)
+       cell_mint (unEnt e);;
        ret e.
 
   Definition genGlobalEnt (τ : typ) : GenLLVM (ident * Ent)
@@ -2828,13 +2885,27 @@ Section InstrGenerators.
       end in
     annotate "gen_gep"
       (t_in_ptr <- get_typ_in_ptr tptr;;
+       (* [route-A chain-memory] fresh attribution for the base-pointer pick. *)
+       _ <- cur_ent_take;;
        eptr <- gen_exp_sz0 tptr;;
+       obase <- cur_ent_take;;
        let paths_in_ptr := get_index_paths_ptr t_in_ptr in (* Inner paths: Paths after removing the outer pointer *)
        '(ret_t, path) <- elems_LLVM paths_in_ptr;; (* Select one path from the paths *)
        let path_for_gep := map (fun x => (TYPE_I 32, EXP_Integer (x))) path in (* Turning the path to integer *)
        '(id, e) <- genInstrIdEnt (TYPE_Pointer (Some ret_t));;
        (* Default to non-deterministic for now. Need a way to look up whether the base pointer was deterministic *)
        (gen_context' .@ entl e .@ deterministic') .= false;;
+       (* [route-A chain-memory] the gep result addresses the SAME memory object as
+          its base (object granularity — offsets ignored) -> inherit the cell. *)
+       (match obase with
+        | None => ret tt
+        | Some bp =>
+            oc <- points_to_find bp;;
+            match oc with
+            | None => ret tt
+            | Some c => points_to_set (unEnt e) c
+            end
+        end);;
        ret (id, INSTR_Op (OP_GetElementPtr t_in_ptr (TYPE_Pointer (Some t_in_ptr), eptr) path_for_gep))).
 
   Definition gen_extractvalue (tagg : typ): GenLLVM (instr_id * instr typ) :=
@@ -3233,8 +3304,96 @@ Section InstrGenerators.
     | _ => failGen "get_typ_in_ptr"
     end.
 
+  (* [route-A chain-memory] biased pointer pick for LOAD (see route_a_mem_w). Scans
+     points_to for in-scope, type-matching pointers whose cell content is tainted;
+     keeps such a pick with probability w/(w+1). Bypasses gen_var_ent, so it
+     replicates the §2/§4 bookkeeping (cur_mask accum + cur_ent) for the picked
+     pointer. Returns None (=> the caller falls back to the ordinary pick, consuming
+     exactly the pre-change randomness) when w = 0 / no candidate / the 1-in-(w+1)
+     fallback fires. Candidate scan is pure state reads — randomness only on the
+     biased path (choose + elems). *)
+  Definition gen_mem_chain_ptr (tptr : typ) : GenLLVM (option ident) :=
+    if Nat.eqb route_a_mem_w 0
+    then ret None
+    else
+      ptm <- use (metadata .@ points_to');;
+      am <- use (metadata .@ arg_set');;
+      locals <- use (gen_context' .@ is_local');;
+      globals <- use (gen_context' .@ is_global');;
+      let tainted_cell (c : Z) : bool :=
+        match IM.Raw.find c am with
+        | Some m => negb (N.eqb m 0%N)
+        | None => false
+        end in
+      let in_scope (p : Z) : bool :=
+        match IM.Raw.find p locals with
+        | Some _ => true
+        | None => match IM.Raw.find p globals with
+                  | Some _ => true
+                  | None => false
+                  end
+        end in
+      let cand0 := IM.Raw.fold
+                     (fun p c acc => if andb (in_scope p) (tainted_cell c)
+                                     then p :: acc else acc)
+                     ptm [] in
+      match cand0 with
+      | [] => ret None
+      | _ :: _ =>
+          ntptr <- normalize_type_GenLLVM tptr;;
+          typed <- map_monad
+                     (fun p =>
+                        ovt <- use (gen_context' .@ entl (mkEnt p) .@ variable_type');;
+                        ret (p, match ovt with
+                                | Some vt => normalized_typ_eq ntptr vt
+                                | None => false
+                                end))
+                     cand0;;
+          match List.filter snd typed with
+          | [] => ret None
+          | (_ :: _) as cands =>
+              b <- lift_GenLLVM (choose (0%nat, route_a_mem_w));;
+              if Nat.eqb b 0%nat
+              then ret None
+              else
+                '(p, _) <- elems_LLVM cands;;
+                onm <- use (gen_context' .@ entl (mkEnt p) .@ name');;
+                match onm with
+                | None => ret None
+                | Some nm =>
+                    cur_mask_accum p;;
+                    cur_ent_set p;;
+                    ret (Some nm)
+                end
+          end
+      end.
+
   Definition gen_load (tptr : typ) : GenLLVM (instr_id * instr typ)
-    := eptr <- gen_exp_sz0 tptr;;
+    := obias <- gen_mem_chain_ptr tptr;;
+       eptr <- (match obias with
+                | Some nm => ret (EXP_Ident nm)
+                | None =>
+                    _ <- cur_ent_take;;   (* fresh attribution for the ordinary pick *)
+                    gen_exp_sz0 tptr
+                end);;
+       (* [route-A chain-memory] whichever path picked the pointer, cur_ent now holds
+          its entity. Propagate the cell content's provenance into the accumulator
+          (-> the load RESULT's arg_set via the result binding) — GATED on the knob:
+          this write feeds arg_set, which the always-on §3 bias reads, so ungated it
+          would change generation even at w=0. *)
+       optr <- cur_ent_take;;
+       (if Nat.eqb route_a_mem_w 0
+        then ret tt
+        else match optr with
+             | None => ret tt
+             | Some p =>
+                 oc <- points_to_find p;;
+                 match oc with
+                 | None => ret tt
+                 | Some c => cm <- arg_mask_lookup c;;
+                             cur_mask_accum_mask cm
+                 end
+             end);;
        vol <- lift (arbitrary : G bool);;
        ptr_typ <- get_typ_in_ptr tptr;;
        align <- ret (Some 1);;
@@ -3259,9 +3418,21 @@ Section InstrGenerators.
   Definition gen_store (tptr : typ) : GenLLVM (instr_id * instr typ)
     :=
     annotate "gen_store"
-      (eptr <- gen_exp_sz0 tptr;;
+      ((* [route-A chain-memory] capture WHICH pointer was picked (cur_ent), then DROP
+          the ptr pick's own mask from the accumulator, so that after gen_store_to the
+          accumulator holds exactly the stored VALUE's mask (correct even for compound
+          values with several ident picks — a single cur_ent lookup would only see the
+          last one). Safe: store binds no result, so the discarded accumulator value
+          was heading for the instruction-boundary reset anyway. See §5. *)
+       _ <- cur_ent_take;;
+       eptr <- gen_exp_sz0 tptr;;
+       optr <- cur_ent_take;;
+       _ <- cur_mask_take;;
        ptr_typ <- get_typ_in_ptr tptr;;
-       gen_store_to(tptr, eptr)).
+       s <- gen_store_to (tptr, eptr);;
+       m <- cur_mask_take;;
+       cell_mask_record optr m;;
+       ret s).
 
   (* Generate an instruction, as well as its type...
 
@@ -3406,7 +3577,14 @@ Section InstrGenerators.
             maybe [] (fun t => ['(id, e) <- genLocalEnt (TYPE_Pointer (Some t));;
                              (* Allocas are non-deterministic *)
                              gen_context' .@ entl e .@ deterministic' .= false;;
+                             (* [route-A chain-memory] fresh memory object -> mint its cell.
+                                genLocalEnt's result binding just RESET cur_mask, so after the
+                                init store below the accumulator holds exactly the stored
+                                VALUE's mask -> record it as the cell content's provenance. *)
+                             cell_mint (unEnt e);;
                              store <- gen_store_to (TYPE_Pointer (Some t), EXP_Ident id);;
+                             m <- cur_mask_take;;
+                             cell_mask_record (Some (unEnt e)) m;;
                              ret [(IId (ident_to_raw_id id), INSTR_Alloca t []); store]]) osized_typ
             ++ maybe [] (fun t => fmap (fun x => [x]) <$> [gen_load t; gen_store t; gen_gep t]) osized_ptr_typ
             ++ maybe [] (fun '(e, t) => [(fun x => [x]) <$> gen_ptrtoint e t]) ovalid_ptr_vecptr
