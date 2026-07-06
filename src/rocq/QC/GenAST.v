@@ -251,6 +251,26 @@ Section GenerationState.
        See ROUTE_A_IMPL.private.md §4-chain-vector. *)
     ; vec_lanes : IM.Raw.t (list (Z * N))
     ; cur_ent : option Z
+    (* [route-A ret-bridge] per-function state for the "bridge to the return type"
+       instruction arm in gen_instr (targets call-drop-ret / ret-drop-val).
+       cur_ret_t : the return type of the HELPER currently being generated (None in
+         main / outside function bodies) — gen_instr needs it but only gen_definition_h
+         knows it, so it travels by state (same side-channel idea as cur_mask/cur_ent).
+       ret_bridge_budget : remaining insertions for this function (the knob
+         route_a_ret_bridge is the per-function cap; 1-2 bridge instructions per
+         function are plausible real code — "building the return value").
+       See ROUTE_A_IMPL §6b-ret-bridge. *)
+    ; cur_ret_t : option typ
+    ; ret_bridge_budget : nat
+    (* [route-A callee-bias 2b] the TYPES (as registered in the global ctx:
+       TYPE_Pointer (Some (TYPE_Function ...))) of helper functions whose body LOADS
+       through one of their pointer params — recorded at gen_definition time by a pure
+       AST scan of the just-built body (approximation documented in
+       private_notes/exp_step2bc/NOTES.md). Read ONLY by the knob-gated 2b bias in
+       gen_function_pointer_type (route_a_callee_ptr_w). The RECORDING is always-on
+       (like vec_lanes): a pure state append, invisible to all generation-time reads
+       when the knob is 0, so it does not perturb the knob=0 stream (MD5-verified). *)
+    ; loading_fn_types : list typ
     }.
 
   Instance Default_GenState {s} : Default (GenState s)
@@ -267,6 +287,9 @@ Section GenerationState.
              ; cur_mask := 0               (* [route-A propagation] *)
              ; vec_lanes := IM.Raw.empty _ (* [route-A chain-vector] *)
              ; cur_ent := None             (* [route-A chain-vector] *)
+             ; cur_ret_t := None           (* [route-A ret-bridge] *)
+             ; ret_bridge_budget := 0      (* [route-A ret-bridge] *)
+             ; loading_fn_types := []      (* [route-A callee-bias 2b] *)
              |}
     }.
 
@@ -287,6 +310,9 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply (vec_lanes s)
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply num_void.
   Defined.
@@ -308,6 +334,9 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply (vec_lanes s)
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply num_raw.
   Defined.
@@ -329,6 +358,9 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply (vec_lanes s)
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply num_global.
   Defined.
@@ -350,6 +382,9 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply (vec_lanes s)
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply num_blocks.
   Defined.
@@ -371,6 +406,9 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply (vec_lanes s)
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply context.
   Defined.
@@ -392,6 +430,9 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply (vec_lanes s)
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply global_memo.
   Defined.
@@ -413,6 +454,9 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply (vec_lanes s)
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply debug_stack.
   Defined.
@@ -435,6 +479,9 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply (vec_lanes s)
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply arg_set.
   Defined.
@@ -456,6 +503,9 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply (vec_lanes s)
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply points_to.
   Defined.
@@ -478,6 +528,9 @@ Section GenerationState.
         | apply x
         | apply (vec_lanes s)
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply cur_mask.
   Defined.
@@ -501,6 +554,9 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply x
         | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply vec_lanes.
   Defined.
@@ -522,8 +578,85 @@ Section GenerationState.
         | apply (cur_mask s)
         | apply (vec_lanes s)
         | apply x
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
         ]; apply gs.
     - apply cur_ent.
+  Defined.
+
+  (* [route-A ret-bridge] lenses for the per-function bridge state. *)
+  Definition cur_ret_t' {s} : Lens' (GenState s) (option typ).
+    red.
+    intros f F afa gs.
+    refine ((fun x => _) <$> afa (_ gs)); try typeclasses eauto.
+    - apply mkGenState;
+        [ apply (num_void s)
+        | apply (num_raw s)
+        | apply (num_global s)
+        | apply (num_blocks s)
+        | apply (context s)
+        | apply (global_memo s)
+        | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
+        | apply x
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
+        ]; apply gs.
+    - apply cur_ret_t.
+  Defined.
+
+  Definition ret_bridge_budget' {s} : Lens' (GenState s) nat.
+    red.
+    intros f F afa gs.
+    refine ((fun x => _) <$> afa (_ gs)); try typeclasses eauto.
+    - apply mkGenState;
+        [ apply (num_void s)
+        | apply (num_raw s)
+        | apply (num_global s)
+        | apply (num_blocks s)
+        | apply (context s)
+        | apply (global_memo s)
+        | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply x
+        | apply (loading_fn_types s)
+        ]; apply gs.
+    - apply ret_bridge_budget.
+  Defined.
+
+  (* [route-A callee-bias 2b] lens for the loading-ptr-param helper-type list. *)
+  Definition loading_fn_types' {s} : Lens' (GenState s) (list typ).
+    red.
+    intros f F afa gs.
+    refine ((fun x => _) <$> afa (_ gs)); try typeclasses eauto.
+    - apply mkGenState;
+        [ apply (num_void s)
+        | apply (num_raw s)
+        | apply (num_global s)
+        | apply (num_blocks s)
+        | apply (context s)
+        | apply (global_memo s)
+        | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply x
+        ]; apply gs.
+    - apply loading_fn_types.
   Defined.
 
 
@@ -714,6 +847,28 @@ Section GenerationState.
      invisible to candidate folds). Knob — tune against the 4 metrics. *)
   Definition route_a_mem_w : nat := 3.
 
+  (* [route-A chain-call] FLAG, not a weight: 0 = seed only main's args (original
+     behaviour); <> 0 = ALSO seed every helper function's params with function-local
+     bits (bit i = "derives from THIS function's param #i"), so the existing §2/§3
+     machinery densifies param->ret flows inside callee bodies (gen_ret's value pick
+     already goes through the bias). Targets call-drop-ret / ret-drop-val: their kill
+     needs the REAL chain [tainted arg -> callee returns param-derived -> caller
+     observes the result]; the caller-side halves already work (§3 biases the args;
+     the call result's mask is the OR of the arg masks). Gated because seeding writes
+     arg_set, which the always-on §3 bias READS — ungated it would change generation
+     at flag=0. See ROUTE_A_IMPL §6-chain-call. *)
+  Definition route_a_call_seed : nat := 1.
+
+  (* [route-A ret-bridge] knob = per-function CAP on inserted bridge instructions
+     (0 = OFF: the arm never enters gen_instr's menu -> stream-identical). A bridge
+     instruction produces a value OF THE CURRENT FUNCTION'S RETURN TYPE from a
+     tainted source (opportunistic load from a tainted cell, else a conversion of a
+     tainted int local), anywhere in the body — so the later [ret] pick finds a
+     tainted candidate of the right type instead of falling back to a constant
+     (97% of helper rets did, ROUTE_A_IMPL §6 diagnosis). 1-2 per function is
+     realistic ("the code that builds the return value"). See §6b. *)
+  Definition route_a_ret_bridge : nat := 2.
+
   (* [route-A chain-vector] soft weight for extractelement's lane pick: read a
      recorded tainted lane of the picked vector with probability w/(w+1); every lane
      stays reachable via the uniform fallback. w = 0 => ORIGINAL uniform pick (chain
@@ -726,6 +881,90 @@ Section GenerationState.
      stays reachable at 1/(w+1). w = 0 => ORIGINAL selection (bias OFF, semantics-
      preserving). Knob — tune against the 4 metrics. See ROUTE_A_IMPL §3-bias. *)
   Definition route_a_bias_w : nat := 3.
+
+  (* [route-A ptr-arg] soft weight for the pointer-argument-to-tainted-cell bias at
+     CALL sites (intervention (c), PLAN §4.3(c)). 0 = OFF and STREAM-IDENTICAL:
+     gen_call_list then takes EXACTLY the original gen_call path with the original
+     randomness (no gen_mem_chain_ptr call at call sites, no extra draws). w > 0
+     enables two mechanisms for each pointer-typed call argument:
+       M1 (pick swap, no new instructions): try gen_mem_chain_ptr FIRST — reuse an
+          in-scope pointer whose cell is already tainted (its cur_mask/cur_ent
+          bookkeeping is done inside gen_mem_chain_ptr); on None, fall through to the
+          ORIGINAL arg generation (which may retro-mint a clean global — program text
+          unchanged; since r7b the mint site exposes the entity via cur_ent so M2/deref
+          shadow bookkeeping reaches retro pointers too).
+       M2 (pre-call tainted store): if M1 found nothing, with prob w/(w+1) PREPEND one
+          [conv; store] pair writing a tainted scalar THROUGH the pointer the ordinary
+          path produced (SCALAR pointee only; non-scalar pointees skip M2), so the
+          callee can load the tainted content across the call boundary. The store
+          mirrors gen_store's shadow bookkeeping (isolate the value's mask, then
+          cell_mask_record the pointer's cell). Attacks Step-1's 100%-retro-mint /
+          0%-tainted-cell facts. Knob — tune against the metrics. *)
+  Definition route_a_ptrarg_w : nat := 3.
+
+  (* [route-A callee-bias 2a] (PLAN §4.3(b), plan-literal) soft weight for the CALLEE
+     SELECTION at the ofun_ptr_typ layer (gen_function_pointer_type). With prob
+     w/(w+1) restrict the picked function-pointer TYPE to candidates whose signature
+     has >=1 SCALAR param (TYPE_I / Float / Double at top level, checked on the
+     NORMALIZED signature); on the 1/(w+1) draw or when no such candidate exists, fall
+     back to the ordinary uniform pick. 0 = OFF and STREAM-IDENTICAL (no candidate
+     scan, no draw — gen_function_pointer_type is EXACTLY the original genMatch).
+     Follows the §3-bias subset pattern. See private_notes/exp_step2bc/NOTES.md. *)
+  Definition route_a_callee_w : nat := 3.
+
+  (* [route-A callee-bias 2b] (lead-adjudicated extension, SEPARATE knob so 2a stays
+     plan-literal and 2b is independently disable-able) soft weight for preferring a
+     LOADING-PTR-PARAM helper at callee selection: candidates whose registered type is
+     in loading_fn_types (helpers whose body loads through a pointer param — recorded
+     per-helper at definition time by a pure AST scan, NOT by a type proxy). Composed
+     BEFORE 2a (channel-B priority, per the plan's (c)-then-(b) spirit): 2b soft-prefers
+     first, and its 1/(w+1)-fallback / empty-subset case defers to the 2a-biased pick,
+     which in turn defers to the ordinary uniform pick. 0 = OFF and STREAM-IDENTICAL.
+     See private_notes/exp_step2bc/NOTES.md §bias-composition. *)
+  Definition route_a_callee_ptr_w : nat := 3.
+
+  (* [route-A param-cell] (USER AMENDMENT r6, PLAN §4.3b) FLAG, not a weight (0 = OFF).
+     Completes the params-as-sources approximation for POINTER params. The param VALUE
+     seed (route_a_call_seed, at param registration) marks the pointer's own bit, but a
+     passed address is a run-invariant constant — runtime-DEAD. The LIVE half is the
+     memory the pointer names. So with the flag on, EVERY function's TYPE_Pointer(Some t)
+     param gets a minted synthetic cell (points_to[param]) whose content mask is the
+     param's own bit (2^i). The always-on route_a_mem_w machinery then (i) soft-prefers
+     loads THROUGH the param inside the body, (ii) propagates bit i into the loaded value,
+     and (iii) the ret-bridge load-arm can pick the param — making the K2-callee shape
+     ("load the param, return it") a preferred generation pattern; store-through-param /
+     gep-of-param cell bookkeeping composes for free (all via points_to/arg_set, no read
+     path changes). 0 gates BOTH the cell mint and the mask seed: no entity ids consumed,
+     nothing written -> trivially stream-identical. Channel-B package (the callee-side
+     receptor of intervention (c)), NOT a third kill intervention: the two-intervention
+     litmus budget is unchanged. See private_notes/exp_step2d/NOTES.md. *)
+  Definition route_a_param_cell : nat := 1.
+
+  (* [route-A arg-deref] (USER AMENDMENT r7, PLAN §4.3c) FLAG, not a weight (0 = OFF).
+     The CALLER-SIDE dual of route_a_param_cell (r6). The pre-r7 call-result approximation
+     "result mask = OR of the arg masks" uses only each pointer ARG's VALUE mask; the
+     POINTEE cell's content mask is IGNORED. Consequence: in the exact channel-B killer
+     chain (main passes a pointer to a tainted cell, the callee loads+returns), the call
+     result is shadow-UNTAINTED, so §3 never routes it toward an observation — funnel
+     stage s4 stays unbiased (a hidden multiplicative penalty). With the flag on, for each
+     pointer argument whose cell is KNOWN, OR arg_set[points_to[p]] (the pointee cell's
+     content provenance — ONE indirection level, matching the shadow's object granularity)
+     into the arg-mask accumulator that add_to_local_ctx assigns to the call RESULT, so the
+     result's SSA mask reflects reachable-memory taint. Covers all THREE settle paths in
+     gen_call_arg: M1 pick (pointer entity in cur_ent), ordinary pick (optr captured by
+     cur_ent_take), and retro-minted global — which, since r7b, ALSO lands in optr: the
+     retro-mint site sets cur_ent (see [route-A arg-deref r7b] in gen_exp_size'), because
+     retro-minting is the DOMINANT ptr-arg path (Step-1 m4 ~100%) and with optr = None
+     both M2's cell_mask_record and this deref were no-ops exactly where M2 creates the
+     taint (lead review finding). optr = None survives only as a defensive dead case.
+     When M2 (the pre-call tainted store) fired, the deref runs AFTER cell_mask_record so
+     it reads the JUST-STORED cell mask. 0 gates every read/write/draw -> trivially
+     stream-identical. NOTE: this flag RIDES the knob-on call-arg path — gen_call_arg is
+     only reached when route_a_ptrarg_w <> 0 (gen_call_list gates on it), so the flag can
+     act only then. State-only (no randomness). NOT a kill intervention (a consistency
+     completion like r6); the two-intervention litmus budget is unchanged. See
+     private_notes/exp_step2e/NOTES.md. *)
+  Definition route_a_arg_deref : nat := 1.
 
   (* #[global] Instance STGST : Monad (stateT GenState G). *)
   (* apply Monad_stateT. *)
@@ -2539,6 +2778,29 @@ Section ExpGenerators.
                  add_to_global_memo (mk_global name t false (Some in_exp) false []);;
                  e <- add_to_global_ctx (ID_Global name, TYPE_Pointer (Some t));;
                  (gen_context' .@ entl e .@ deterministic') .= false;;
+                 (* [route-A arg-deref r7b] (PLAN §4.3c) expose the retro-minted pointer's
+                    ENTITY via cur_ent, exactly like an ordinary gen_var_ent pick — so the
+                    call-arg capture (optr <- cur_ent_take in gen_call_arg) sees it and BOTH
+                    cell_mask_record (M2's store bookkeeping) and arg_deref_reflect act on
+                    it. Pre-r7b, optr stayed None on this DOMINANT path (Step-1 m4: ~100%
+                    of main's ptr args are retro-minted), nullifying §4.3c exactly where
+                    (c)'s M2 creates the reachable-memory taint. GATED on route_a_ptrarg_w
+                    (the (c) cluster this serves): the ALWAYS-ON variant measurably shifted
+                    the ptrarg=0 stream (exp_step2e proghash_r7b_offpath.txt, cascade from
+                    program 6) — gen_store's always-on capture then records tainted cells
+                    through store-window retro-mints, and gen_mem_chain_ptr READS cell
+                    masks at the COMMITTED default route_a_mem_w=3 — so §2.1 knob
+                    discipline demands the gate. At ptrarg<>0 the set fires at EVERY retro
+                    mint (call args AND the store/gep/load pick windows): the extra
+                    store/gep shadow bookkeeping on retro pointers is a semantically
+                    correct improvement, fine for the knob-on stream (no baseline).
+                    State-only, no randomness; stale values die at gen_instr's boundary
+                    reset or the captures' clear-before-pick takes; non-call-arg capture
+                    consumers read value-identical data for a FRESH retro entity
+                    (vec_lanes_find = [], arg-mask/cell-mask = 0). *)
+                 (if Nat.eqb route_a_ptrarg_w 0
+                  then ret tt
+                  else cur_ent_set (unEnt e));;
                  ret (EXP_Ident (ID_Global name)))
             else freq_LLVM (gen_idents)
         (* TODO: handle opaque ptrs *)
@@ -3368,6 +3630,215 @@ Section InstrGenerators.
           end
       end.
 
+  (* [route-A ret-bridge] eligibility + conversion-source scan for the bridge arm.
+     Some (normalized ret type, conversion sources) when: insertions remain, we are
+     inside a helper whose ret type is scalar, and >= 1 tainted int-typed LOCAL of a
+     usable width is in scope — the sources list guarantees the arm cannot fail even
+     when the opportunistic load sub-arm finds nothing. Pure state reads, no
+     randomness. Cost note: the arg_set fold runs only while a helper still has
+     budget (main has budget 0 -> early None). *)
+  Definition gen_ret_bridge_info : GenLLVM (option (typ * list (Z * typ))) :=
+    if Nat.eqb route_a_ret_bridge 0
+    then ret None
+    else
+      budget <- use (metadata .@ ret_bridge_budget');;
+      if Nat.eqb budget 0
+      then ret None
+      else
+        ort <- use (metadata .@ cur_ret_t');;
+        match ort with
+        | None => ret None
+        | Some rt =>
+            nrt <- normalize_type_GenLLVM rt;;
+            match nrt with
+            | TYPE_I _ | TYPE_Float | TYPE_Double
+            | TYPE_Vector _ _ | TYPE_Array _ _
+            | TYPE_Struct _ | TYPE_Packed_struct _ =>
+                am <- use (metadata .@ arg_set');;
+                locals <- use (gen_context' .@ is_local');;
+                let tainted_local (k : Z) (m : N) : bool :=
+                  andb (negb (N.eqb m 0%N))
+                       (match IM.Raw.find k locals with
+                        | Some _ => true
+                        | None => false
+                        end) in
+                let cand0 := IM.Raw.fold
+                               (fun k m acc => if tainted_local k m then k :: acc else acc)
+                               am [] in
+                typed <- map_monad
+                           (fun k =>
+                              ovt <- use (gen_context' .@ entl (mkEnt k) .@ variable_type');;
+                              ret (k, ovt)) cand0;;
+                let ok_src (p : Z * option typ) : list (Z * typ) :=
+                  match p with
+                  | (k, Some (TYPE_I n)) =>
+                      match nrt with
+                      | TYPE_I m => if Pos.eqb n m then [] else [(k, TYPE_I n)]
+                      | _ => [(k, TYPE_I n)]  (* float/double: sitofp; composite: conv
+                                                 targets the element/field type later *)
+                      end
+                  | _ => []
+                  end in
+                match List.concat (List.map ok_src typed) with
+                | [] => ret None
+                | srcs => ret (Some (nrt, srcs))
+                end
+            | _ => ret None
+            end
+        end.
+
+  (* [route-A ret-bridge] the bridge instruction itself. Opportunistic LOAD from a
+     tainted cell of pointee type rt (composes the memory chain: a killer can be
+     store -> load -> ... -> ret), else a CONVERSION of a tainted int local to rt
+     (guaranteed constructible by gen_ret_bridge_info). The result is bound
+     normally: its mask flows via cur_mask/add_to_local_ctx, and it merely COMPETES
+     for the eventual ret pick under 320:10 + §3 bias — nothing is forced. *)
+  (* [route-A ret-bridge] one conversion of tainted int local [k] (type st) to a
+     SCALAR target: returns (result ident, result entity, instruction). The result
+     is context-bound, so it also competes on its own downstream. *)
+  Definition gen_bridge_conv (k : Z) (st tgt : typ) : GenLLVM (option (ident * Ent * (instr_id * instr typ))) :=
+    onm <- use (gen_context' .@ entl (mkEnt k) .@ name');;
+    match onm with
+    | None => ret None
+    | Some nm =>
+        cur_mask_accum k;;
+        let cv := match st, tgt with
+                  | TYPE_I n, TYPE_I m => if Pos.ltb m n then Trunc else Sext
+                  | _, TYPE_Float | _, TYPE_Double => Sitofp
+                  | _, _ => Sext
+                  end in
+        '(cnm, ce) <- genLocalEnt tgt;;
+        ret (Some (cnm, ce, (IId (ident_to_raw_id cnm), INSTR_Op (OP_Conversion cv st (EXP_Ident nm) tgt))))
+    end.
+
+  (* Element/field-typed tainted value for a COMPOSITE bridge: the source directly
+     when types already match, else one conversion (scalar targets only). *)
+  Definition gen_bridge_elem (k : Z) (st elem : typ) : GenLLVM (option (ident * Ent * list (instr_id * instr typ))) :=
+    if normalized_typ_eq st elem
+    then onm <- use (gen_context' .@ entl (mkEnt k) .@ name');;
+         match onm with
+         | None => ret None
+         | Some nm => ret (Some (nm, mkEnt k, []))
+         end
+    else match elem with
+         | TYPE_I _ | TYPE_Float | TYPE_Double =>
+             oc <- gen_bridge_conv k st elem;;
+             match oc with
+             | None => ret None
+             | Some (nm, ce, ins) => ret (Some (nm, ce, [ins]))
+             end
+         | _ => ret None
+         end.
+
+  (* First struct field with a scalar type (with its index), if any. *)
+  Fixpoint bridge_first_scalar (fs : list typ) (i : Z) {struct fs} : option (Z * typ) :=
+    match fs with
+    | [] => None
+    | f :: tl => match f with
+                 | TYPE_I _ | TYPE_Float | TYPE_Double => Some (i, f)
+                 | _ => bridge_first_scalar tl (i + 1)%Z
+                 end
+    end.
+
+  (* Always-valid single conversion — total fallback when the return type offers no
+     scalar slot (burns the budget slot harmlessly instead of failing gen_instr). *)
+  Definition gen_bridge_fallback (k : Z) (st : typ) : GenLLVM (list (instr_id * instr typ)) :=
+    let tgt := match st with
+               | TYPE_I n => if Pos.eqb n 64 then TYPE_I 32 else TYPE_I 64
+               | _ => TYPE_I 64
+               end in
+    oc <- gen_bridge_conv k st tgt;;
+    match oc with
+    | Some (_, _, ins) => ret [ins]
+    | None => failGen "gen_bridge_fallback: nameless candidate"
+    end.
+
+  (* Scalar return type: opportunistic load from a tainted cell (composes the memory
+     chain), else a conversion of the tainted int source. *)
+  Definition gen_bridge_scalar (rt : typ) (k : Z) (st : typ) : GenLLVM (list (instr_id * instr typ)) :=
+    oload <- gen_mem_chain_ptr (TYPE_Pointer (Some rt));;
+    match oload with
+    | Some pnm =>
+        op <- cur_ent_take;;
+        (match op with
+         | Some p => oc <- points_to_find p;;
+                     match oc with
+                     | None => ret tt
+                     | Some c => cm <- arg_mask_lookup c;;
+                                 cur_mask_accum_mask cm
+                     end
+         | None => ret tt
+         end);;
+        id <- genInstrId rt;;
+        ret [(id, INSTR_Load rt (TYPE_Pointer (Some rt), EXP_Ident pnm) [])]
+    | None =>
+        oc <- gen_bridge_conv k st rt;;
+        match oc with
+        | Some (_, _, ins) => ret [ins]
+        | None => gen_bridge_fallback k st
+        end
+    end.
+
+  (* Vector return type: [conv;] insertelement of a tainted element; the written
+     lane is recorded in vec_lanes (composes with chain-vector). *)
+  Definition gen_bridge_vector (rt : typ) (sz : N) (elem : typ) (k : Z) (st : typ)
+    : GenLLVM (list (instr_id * instr typ)) :=
+    oe <- gen_bridge_elem k st elem;;
+    match oe with
+    | None => gen_bridge_fallback k st
+    | Some (enm, ee, ecode) =>
+        _ <- cur_ent_take;;
+        evec <- gen_exp_sz0 rt;;
+        obase <- cur_ent_take;;
+        lane <- lift_GenLLVM (choose (0, Z.of_N (sz - 1)));;
+        cur_mask_accum (unEnt ee);;
+        em <- arg_mask_lookup (unEnt ee);;
+        '(inm, ie) <- genLocalEnt rt;;
+        vec_lanes_update (unEnt ie) obase lane em;;
+        ret ((ecode ++ [(IId (ident_to_raw_id inm),
+              INSTR_Op (OP_InsertElement (rt, evec) (elem, EXP_Ident enm)
+                                         (TYPE_I 32, EXP_Integer lane)))])%list)
+    end.
+
+  (* Array/struct return type: [conv;] insertvalue of a tainted element at path
+     [idx] whose field type is [ft]. *)
+  Definition gen_bridge_insertvalue (rt ft : typ) (idx : Z) (k : Z) (st : typ)
+    : GenLLVM (list (instr_id * instr typ)) :=
+    oe <- gen_bridge_elem k st ft;;
+    match oe with
+    | None => gen_bridge_fallback k st
+    | Some (enm, ee, ecode) =>
+        eagg <- gen_exp_sz0 rt;;
+        cur_mask_accum (unEnt ee);;
+        '(inm, _) <- genLocalEnt rt;;
+        ret ((ecode ++ [(IId (ident_to_raw_id inm),
+              INSTR_Op (OP_InsertValue (rt, eagg) (ft, EXP_Ident enm) [idx]))])%list)
+    end.
+
+  (* [route-A ret-bridge] the bridge arm: dispatch on the (normalized) return type's
+     shape. Every path is total. *)
+  Definition gen_ret_bridge_instr (info : typ * list (Z * typ)) : GenLLVM (list (instr_id * instr typ)) :=
+    let '(rt, srcs) := info in
+    budget <- use (metadata .@ ret_bridge_budget');;
+    metadata .@ ret_bridge_budget' .= (budget - 1)%nat;;
+    '(k, st) <- elems_LLVM srcs;;
+    match rt with
+    | TYPE_I _ | TYPE_Float | TYPE_Double => gen_bridge_scalar rt k st
+    | TYPE_Vector sz elem => gen_bridge_vector rt sz elem k st
+    | TYPE_Array sz elem =>
+        (* [0 x T] arrays exist and are even common — choose(0, -1) crashes. *)
+        if N.eqb sz 0
+        then gen_bridge_fallback k st
+        else idx <- lift_GenLLVM (choose (0, Z.of_N sz - 1)%Z);;
+             gen_bridge_insertvalue rt elem idx k st
+    | TYPE_Struct fields | TYPE_Packed_struct fields =>
+        match bridge_first_scalar fields 0%Z with
+        | None => gen_bridge_fallback k st
+        | Some (fi, ft) => gen_bridge_insertvalue rt ft fi k st
+        end
+    | _ => gen_bridge_fallback k st
+    end.
+
   Definition gen_load (tptr : typ) : GenLLVM (instr_id * instr typ)
     := obias <- gen_mem_chain_ptr tptr;;
        eptr <- (match obias with
@@ -3434,6 +3905,277 @@ Section InstrGenerators.
        cell_mask_record optr m;;
        ret s).
 
+  (* [route-A ptr-arg] find a tainted int-typed LOCAL in scope usable as the source of
+     a stored scalar of target type [tgt], EXCLUDING same-width TYPE_I sources when
+     [tgt] is TYPE_I (a same-width sext is illegal — mirrors gen_ret_bridge_info's
+     ok_src). Pure state reads; randomness ONLY via elems on a non-empty candidate set
+     (an empty scan consumes none, so M2 is silent when no tainted int is available). *)
+  Definition gen_ptrarg_int_source (tgt : typ) : GenLLVM (option (Z * typ)) :=
+    am <- use (metadata .@ arg_set');;
+    locals <- use (gen_context' .@ is_local');;
+    let tainted_local (k : Z) (m : N) : bool :=
+      andb (negb (N.eqb m 0%N))
+           (match IM.Raw.find k locals with
+            | Some _ => true
+            | None => false
+            end) in
+    let cand0 := IM.Raw.fold
+                   (fun k m acc => if tainted_local k m then k :: acc else acc)
+                   am [] in
+    typed <- map_monad
+               (fun k =>
+                  ovt <- use (gen_context' .@ entl (mkEnt k) .@ variable_type');;
+                  ret (k, ovt)) cand0;;
+    let ok_src (p : Z * option typ) : list (Z * typ) :=
+      match p with
+      | (k, Some (TYPE_I n)) =>
+          match tgt with
+          | TYPE_I m => if Pos.eqb n m then [] else [(k, TYPE_I n)]
+          | _ => [(k, TYPE_I n)]
+          end
+      | _ => []
+      end in
+    match List.concat (List.map ok_src typed) with
+    | [] => ret None
+    | (_ :: _) as srcs => '(k, st) <- elems_LLVM srcs;; ret (Some (k, st))
+    end.
+
+  (* [route-A ptr-arg / c-fix] build a tainted VECTOR value of type [rt = <sz x elem>]
+     bound to a fresh register; returns (register ident, entity, [conv?; insertelement]).
+     STORE-side analogue of gen_bridge_vector (which returns only the list, for the ret
+     pick) — kept SEPARATE so gen_bridge_vector's always-on-capable ret-bridge stream is
+     untouched. None when no tainted element of type [elem] can be built. *)
+  Definition gen_ptrarg_vec_val (rt : typ) (sz : N) (elem : typ) (k : Z) (st : typ)
+    : GenLLVM (option (ident * Ent * list (instr_id * instr typ))) :=
+    oe <- gen_bridge_elem k st elem;;
+    match oe with
+    | None => ret None
+    | Some (enm, ee, ecode) =>
+        _ <- cur_ent_take;;
+        evec <- gen_exp_sz0 rt;;
+        obase <- cur_ent_take;;
+        lane <- lift_GenLLVM (choose (0, Z.of_N (sz - 1)));;
+        cur_mask_accum (unEnt ee);;
+        em <- arg_mask_lookup (unEnt ee);;
+        '(inm, ie) <- genLocalEnt rt;;
+        vec_lanes_update (unEnt ie) obase lane em;;
+        ret (Some (inm, ie, (ecode ++ [(IId (ident_to_raw_id inm),
+              INSTR_Op (OP_InsertElement (rt, evec) (elem, EXP_Ident enm)
+                                         (TYPE_I 32, EXP_Integer lane)))])%list))
+    end.
+
+  (* [route-A ptr-arg / c-fix] build a tainted ARRAY/STRUCT value of type [rt] bound to a
+     fresh register via insertvalue of a tainted element/field [ft] at path [idx];
+     returns (register ident, entity, [conv?; insertvalue]). Store-side analogue of
+     gen_bridge_insertvalue. None when no tainted [ft] element can be built. *)
+  Definition gen_ptrarg_agg_val (rt ft : typ) (idx : Z) (k : Z) (st : typ)
+    : GenLLVM (option (ident * Ent * list (instr_id * instr typ))) :=
+    oe <- gen_bridge_elem k st ft;;
+    match oe with
+    | None => ret None
+    | Some (enm, ee, ecode) =>
+        eagg <- gen_exp_sz0 rt;;
+        cur_mask_accum (unEnt ee);;
+        '(inm, ie) <- genLocalEnt rt;;
+        ret (Some (inm, ie, (ecode ++ [(IId (ident_to_raw_id inm),
+              INSTR_Op (OP_InsertValue (rt, eagg) (ft, EXP_Ident enm) [idx]))])%list))
+    end.
+
+  (* [route-A ptr-arg / c-fix] build a tainted value of a STORABLE pointee type [t]
+     (scalar OR composite) bound to a fresh register; returns (register ident, entity,
+     build instructions). Finds its OWN tainted int source (gen_ptrarg_int_source on the
+     relevant scalar target — the pointee for scalars, the element / first-scalar-field
+     for composites) and reuses the shared bridge leaves. None when no tainted int source
+     is in scope, or [t] offers no usable scalar slot ([0 x T] array, empty/scalar-less
+     struct, non-scalar element). Same-width int sources are conservatively excluded by
+     gen_ptrarg_int_source even where gen_bridge_elem could reuse them directly — a
+     documented missed opportunity, never an illegal instruction. *)
+  Definition gen_ptrarg_store_val (t : typ)
+    : GenLLVM (option (ident * Ent * list (instr_id * instr typ))) :=
+    match t with
+    | TYPE_I _ | TYPE_Float | TYPE_Double =>
+        osrc <- gen_ptrarg_int_source t;;
+        match osrc with
+        | None => ret None
+        | Some (k, st) =>
+            oconv <- gen_bridge_conv k st t;;
+            match oconv with
+            | None => ret None
+            | Some (cnm, ce, convins) => ret (Some (cnm, ce, [convins]))
+            end
+        end
+    | TYPE_Vector sz elem =>
+        osrc <- gen_ptrarg_int_source elem;;
+        match osrc with
+        | None => ret None
+        | Some (k, st) => gen_ptrarg_vec_val t sz elem k st
+        end
+    | TYPE_Array sz elem =>
+        (* [0 x T] arrays are common — choose(0,-1) would crash (PLAN §5); skip M2. *)
+        if N.eqb sz 0
+        then ret None
+        else
+          osrc <- gen_ptrarg_int_source elem;;
+          match osrc with
+          | None => ret None
+          | Some (k, st) =>
+              idx <- lift_GenLLVM (choose (0, Z.of_N sz - 1)%Z);;
+              gen_ptrarg_agg_val t elem idx k st
+          end
+    | TYPE_Struct fields | TYPE_Packed_struct fields =>
+        match bridge_first_scalar fields 0%Z with
+        | None => ret None
+        | Some (fi, ft) =>
+            osrc <- gen_ptrarg_int_source ft;;
+            match osrc with
+            | None => ret None
+            | Some (k, st) => gen_ptrarg_agg_val t ft fi k st
+            end
+        end
+    | _ => ret None
+    end.
+
+  (* [route-A arg-deref] (PLAN §4.3c) core: OR the pointee cell's content mask
+     (arg_set[points_to[p]] — ONE indirection level, the shadow's object granularity)
+     into the cur_mask accumulator that add_to_local_ctx assigns to the call result, so
+     the result's SSA mask reflects reachable-memory taint. State-only (no randomness);
+     no-op when the pointer entity [p] has no known cell. *)
+  Definition arg_deref_reflect_ent (p : Z) : GenLLVM unit :=
+    oc <- points_to_find p;;
+    match oc with
+    | None => ret tt
+    | Some c => m <- arg_mask_lookup c;; cur_mask_accum_mask m
+    end.
+
+  (* [route-A arg-deref] (PLAN §4.3c) ordinary / retro-mint settle paths: [oent] is the
+     pointer entity already captured by cur_ent_take. Since r7b BOTH paths deliver Some
+     (ordinary pick via gen_var_ent; retro-mint via the mint-site cur_ent_set — retro
+     globals DO have cells, minted by add_to_global_ctx); None is a defensive dead case.
+     route_a_arg_deref = 0 gates every read/write (trivially stream-identical). Rides
+     the knob-on call-arg path. *)
+  Definition arg_deref_reflect (oent : option Z) : GenLLVM unit :=
+    if Nat.eqb route_a_arg_deref 0
+    then ret tt
+    else match oent with
+         | None => ret tt
+         | Some p => arg_deref_reflect_ent p
+         end.
+
+  (* [route-A arg-deref] (PLAN §4.3c) M1 settle path: gen_mem_chain_ptr set cur_ent to the
+     picked (already tainted-cell) pointer entity. Flag-gated PEEK — at 0 nothing is even
+     read from cur_ent. *)
+  Definition arg_deref_reflect_cur : GenLLVM unit :=
+    if Nat.eqb route_a_arg_deref 0
+    then ret tt
+    else oent <- use (metadata .@ cur_ent');;
+         match oent with
+         | None => ret tt
+         | Some p => arg_deref_reflect_ent p
+         end.
+
+  (* [route-A ptr-arg] generate ONE call argument (intervention (c)): returns the
+     (type, expr) pair plus any PRE-CALL instructions to prepend (empty except on M2).
+     Only reached on the knob-on path (route_a_ptrarg_w <> 0). *)
+  Definition gen_call_arg (arg_typ : typ)
+    : GenLLVM ((typ * exp typ) * list (instr_id * instr typ)) :=
+    match arg_typ with
+    | TYPE_Pointer (Some t) =>
+        (* M1: reuse an in-scope pointer whose cell is already tainted. *)
+        omem <- gen_mem_chain_ptr arg_typ;;
+        match omem with
+        | Some nm =>
+            (* [route-A arg-deref] (PLAN §4.3c) settle path (a): M1 pick — the pointer
+               entity is in cur_ent (gen_mem_chain_ptr set it); reflect its pointee mask
+               into the call result. gen_mem_chain_ptr only picks TAINTED-cell pointers,
+               so this is exactly the channel-B carrier the result was missing. *)
+            arg_deref_reflect_cur;;
+            ret ((arg_typ, EXP_Ident nm), [])
+        | None =>
+            (* fall through to the ORIGINAL arg generation (may retro-mint a global). *)
+            _ <- cur_ent_take;;
+            arg_exp <- gen_exp_sz0 arg_typ;;
+            (* ptr entity: Some for an ordinary pick AND (since r7b) for a retro-minted
+               global — the mint site sets cur_ent, so M2's cell_mask_record and the
+               arg-deref act on retro pointers too (the ~100%-dominant path, Step-1 m4). *)
+            optr <- cur_ent_take;;
+            (* M2 (c-fix): pre-call tainted store of a value OF THE POINTEE TYPE [t]
+               through the pointer — SCALAR or COMPOSITE pointee (v1 was scalar-only).
+               The per-arg w/(w+1) draw gates M2 FIRST and uniformly across shapes; this
+               moves the draw ahead of source-finding vs v1 (invisible at knob 0, where
+               gen_call_arg is never reached; the knob-on stream has no baseline). *)
+            b <- lift_GenLLVM (choose (0%nat, route_a_ptrarg_w));;
+            if Nat.eqb b 0%nat
+            then
+              (* [route-A arg-deref] (PLAN §4.3c) settle paths (b)/(c): M2 not fired —
+                 reflect the pointer's PRE-EXISTING pointee mask (ordinary pick and,
+                 since r7b, retro-mint both give Some optr; a fresh retro cell's mask
+                 is 0, so the OR is a no-op there). *)
+              arg_deref_reflect optr;;
+              ret ((arg_typ, arg_exp), [])
+            else
+              (* isolate the STORED VALUE's mask from the call RESULT's mask (which must
+                 stay the OR of the ARG masks — the pointer's own, mask 0 for a retro
+                 global): save the accumulator, let gen_ptrarg_store_val build+bind the
+                 tainted value (its final genLocalEnt resets cur_mask to 0 — true for the
+                 scalar gen_bridge_conv AND the composite builders), read the value's mask
+                 off the bound register's arg_set, cell_mask_record the pointer's cell,
+                 then RESTORE. Mirrors gen_store; multi-arg M2 firings compose (each
+                 save/restore is local). *)
+              saved <- cur_mask_take;;
+              oval <- gen_ptrarg_store_val t;;
+              match oval with
+              | None =>
+                  cur_mask_accum_mask saved;;
+                  (* [route-A arg-deref] (PLAN §4.3c) settle paths (b)/(c): M2 built no
+                     value — reflect the cell as-is. *)
+                  arg_deref_reflect optr;;
+                  ret ((arg_typ, arg_exp), [])
+              | Some (vnm, ve, valins) =>
+                  sid <- genVoid;;
+                  vmask <- arg_mask_lookup (unEnt ve);;
+                  cell_mask_record optr vmask;;
+                  cur_mask_accum_mask saved;;
+                  (* [route-A arg-deref] (PLAN §4.3c) settle path (b) with M2: this deref
+                     runs AFTER cell_mask_record, so arg_set[points_to[optr]] already holds
+                     vmask (the value M2 just stored through the pointer) — that just-stored
+                     taint now feeds the call RESULT's mask. Since r7b this INCLUDES the
+                     dominant retro-minted-pointer case: the mint site set cur_ent, so
+                     optr = Some(retro entity) and its add_to_global_ctx-minted cell takes
+                     the record; pre-r7b optr was None here and the whole M2 shadow write
+                     was silently lost (lead review finding). *)
+                  arg_deref_reflect optr;;
+                  ret ((arg_typ, arg_exp),
+                       (valins
+                        ++ [(sid, INSTR_Store (t, EXP_Ident vnm) (arg_typ, arg_exp) [ANN_align 1])])%list)
+              end
+        end
+    | _ =>
+        arg_exp <- gen_exp_sz0 arg_typ;;
+        ret ((arg_typ, arg_exp), [])
+    end.
+
+  (* [route-A ptr-arg] LIST-returning call generator emitting [pre-stores...; call].
+     At route_a_ptrarg_w = 0 this is EXACTLY (fun x => [x]) <$> gen_call (byte-identical
+     stream: same single gen_call call, same wrap). The gen_instr call arm uses this;
+     gen_call itself is unchanged for any other caller. *)
+  Definition gen_call_list (tfun : typ) : GenLLVM (list (instr_id * instr typ)) :=
+    if Nat.eqb route_a_ptrarg_w 0
+    then '(id, i) <- gen_call tfun;; ret [(id, i)]
+    else
+      annotate "gen_call_list"
+        match tfun with
+        | TYPE_Pointer (Some (TYPE_Function ret_t args varargs)) =>
+            results <- map_monad gen_call_arg args;;
+            let args_texp := map fst results in
+            let prestores := List.concat (map snd results) in
+            let args_with_params := map (fun arg => (arg, [])) args_texp in
+            efun <- gen_exp_possibly_non_deterministic_sz0 tfun;;
+            id <- genInstrId ret_t;;
+            ret ((prestores
+                  ++ [(id, INSTR_Call (TYPE_Function ret_t args varargs, efun) args_with_params [])])%list)
+        | _ => failGen "gen_call_list"
+        end.
+
   (* Generate an instruction, as well as its type...
 
      The type is sometimes void for instructions that don't really
@@ -3483,10 +4225,70 @@ Section InstrGenerators.
          (use (gen_context' .@ is_vector'))
          (queryl variable_type').
 
+  (* [route-A callee-bias] scalar-param predicate (2a). Robust to an unwrapped
+     TYPE_Function and to normalization (checked on the normalized signature). *)
+  Definition is_scalar_typ (t : typ) : bool :=
+    match t with
+    | TYPE_I _ | TYPE_Float | TYPE_Double => true
+    | _ => false
+    end.
+
+  Definition fptr_arg_typs (t : typ) : option (list typ) :=
+    match t with
+    | TYPE_Pointer (Some (TYPE_Function _ args _)) => Some args
+    | TYPE_Function _ args _ => Some args
+    | _ => None
+    end.
+
+  Definition fptr_has_scalar_param (t : typ) : bool :=
+    match fptr_arg_typs t with
+    | Some args => existsb is_scalar_typ args
+    | None => false
+    end.
+
+  (* [route-A callee-bias] soft-prefer a function-pointer TYPE among candidates matching
+     [filter]: with prob w/(w+1) return the filtered pick; on the 1/(w+1) draw OR an empty
+     filtered subset, defer to [base]. w = 0 => [base] with NO candidate scan and NO draw,
+     so composing these is stream-identical to [base] when every weight is 0. Reservoir
+     pick over the is_function_pointer' candidates via genMatch, exactly like the ordinary
+     pick — the §3-bias subset idea moved to the ofun_ptr_typ selection layer. *)
+  Definition soft_prefer_fptr (w : nat) (filter : GenQuery typ)
+      (base : GenLLVM (option typ)) : GenLLVM (option typ) :=
+    if Nat.eqb w 0
+    then base
+    else
+      obiased <- genMatch (use (gen_context' .@ is_function_pointer')) filter;;
+      match obiased with
+      | Some _ =>
+          b <- lift_GenLLVM (choose (0%nat, w));;
+          if Nat.eqb b 0%nat then base else ret obiased
+      | None => base
+      end.
+
+  (* [route-A callee-bias] PLAN §4.3(b) (2a: scalar-param) + lead-adjudicated 2b
+     (loading-ptr-param), at the ofun_ptr_typ / gen_function_pointer_type layer, BEFORE
+     gen_call (which only draws a pointer VALUE of the already-fixed type). knob=0 (BOTH
+     weights) => EXACTLY the original genMatch (byte-identical stream — no scan/draw/read).
+     Otherwise compose 2b OUTSIDE 2a (channel-B priority, per the plan's (c)-then-(b)
+     spirit): 2b soft-prefers loading-ptr helpers first; its fallback / empty-subset case
+     defers to the 2a-biased pick (scalar-param helpers), which defers to the ordinary
+     uniform pick. The `loading` state read consumes no randomness. *)
   Definition gen_function_pointer_type : GenLLVM (option typ)
-    := genMatch
-         (use (gen_context' .@ is_function_pointer'))
-         (queryl variable_type').
+    := let base0 : GenLLVM (option typ) :=
+         genMatch (use (gen_context' .@ is_function_pointer')) (queryl variable_type') in
+       if andb (Nat.eqb route_a_callee_w 0) (Nat.eqb route_a_callee_ptr_w 0)
+       then base0
+       else
+         loading <- use (metadata .@ loading_fn_types');;
+         let filt_scalar : GenQuery typ :=
+           (t <- queryl variable_type';;
+            nt <- queryl normalized_type';;
+            if fptr_has_scalar_param nt then ret t else mzero) in
+         let filt_loading : GenQuery typ :=
+           (t <- queryl variable_type';;
+            if existsb (fun lt => normalized_typ_eq t lt) loading then ret t else mzero) in
+         soft_prefer_fptr route_a_callee_ptr_w filt_loading
+           (soft_prefer_fptr route_a_callee_w filt_scalar base0).
 
   Definition gen_insertvalue_type : GenLLVM (option typ)
     := genMatch
@@ -3566,6 +4368,9 @@ Section InstrGenerators.
        oinsertvalue_typ <- gen_insertvalue_type;;
        ofun_ptr_typ <- gen_function_pointer_type;;
        osized_typ <- gen_sized_typ_in_context;;
+       (* [route-A ret-bridge] conditional arm: only inside a helper with budget left,
+          scalar ret type, and an available tainted source (see gen_ret_bridge_info). *)
+       oret_bridge <- gen_ret_bridge_info;;
        oneOf_LLVM
          ([ op <- gen_op_instr;; t <- gen_op_typ;;
             ret [op]
@@ -3592,7 +4397,8 @@ Section InstrGenerators.
             ++ maybe [] (fun t => [(fun x => [x]) <$> gen_extractvalue t]) oagg_typ
             ++ maybe [] (fun t => [(fun x => [x]) <$> gen_insertvalue t]) oinsertvalue_typ
             ++ maybe [] (fun t => fmap (fun x => [x]) <$> [gen_extractelement t; gen_insertelement t]) ovec_typ
-            ++ maybe [] (fun t => [(fun x => [x]) <$> gen_call t]) ofun_ptr_typ
+            ++ maybe [] (fun t => [gen_call_list t]) ofun_ptr_typ
+            ++ maybe [] (fun info => [gen_ret_bridge_instr info]) oret_bridge
          )).
 
   Fixpoint gen_code_length (n : nat) : GenLLVM (code typ)
@@ -3825,19 +4631,110 @@ Section InstrGenerators.
        ret (List.concat seeds).
   (* Don't want to generate CFGs, actually. Want to generated TLEs *)
 
+  (* [route-A callee-bias 2b] pure AST scan: does the body LOAD through one of its
+     pointer PARAMS? A single forward pass per block threads a "param-derived pointer"
+     set (a local is param-derived if it IS a param, or is bound by a gep / bitcast whose
+     base is param-derived); a load whose pointer operand is param-derived counts.
+     Direct-name match dominates (generated loads pick a pointer VARIABLE — often a param
+     — directly); the gep/bitcast chain widens it. Approximations (honest): forward
+     single-pass (sound for SSA: defs dominate uses); pointer-in-memory (a param stored
+     then reloaded) is NOT traced; index/phi-mixed provenance is ignored. Over/under-
+     approximation is harmless — 2b is bias-only (principle 3). *)
+  Definition raw_id_eqb (a b : raw_id) : bool :=
+    match a, b with
+    | Name s1, Name s2 => String.eqb s1 s2
+    | Anon n1, Anon n2 => Z.eqb n1 n2
+    | Raw n1, Raw n2 => Z.eqb n1 n2
+    | _, _ => false
+    end.
+
+  Definition exp_is_param_derived (roots : list raw_id) (e : exp typ) : bool :=
+    match e with
+    | EXP_Ident (ID_Local r) => existsb (raw_id_eqb r) roots
+    | _ => false
+    end.
+
+  Definition scan_code_pd (params : list raw_id)
+      (acc : list raw_id * bool) (c : list (instr_id * instr typ)) : (list raw_id * bool) :=
+    fold_left
+      (fun (st : list raw_id * bool) (ii : instr_id * instr typ) =>
+         let '(derived, found) := st in
+         match ii with
+         | (IId _, INSTR_Load _ (_, ptr) _) =>
+             (derived, orb found (exp_is_param_derived (params ++ derived) ptr))
+         | (IId res, INSTR_Op (OP_GetElementPtr _ (_, base) _)) =>
+             (if exp_is_param_derived (params ++ derived) base
+              then res :: derived else derived, found)
+         | (IId res, INSTR_Op (OP_Conversion Bitcast _ base _)) =>
+             (if exp_is_param_derived (params ++ derived) base
+              then res :: derived else derived, found)
+         | _ => (derived, found)
+         end)
+      c acc.
+
+  Definition body_loads_through_param (params : list raw_id)
+      (bs : block typ * list (block typ)) : bool :=
+    let '(entry, rest) := bs in
+    snd (fold_left (fun (st : list raw_id * bool) (blk : block typ) =>
+                      scan_code_pd params st (blk_code blk))
+                   (entry :: rest) (@nil raw_id, false)).
+
+  (* [route-A param-cell] (r6, PLAN §4.3b) seed the POINTEE cell of every pointer param.
+     For param #i of type TYPE_Pointer (Some t): mint a synthetic cell for the param
+     entity, then set arg_set[cell] := 2^i (the param's OWN bit — the same bit the value
+     seed above assigns to the pointer register). cell_mint only writes points_to, so we
+     mint, look the cell back up (points_to_find), then seed its mask. This makes the
+     pointee memory a taint source (the live half; the pointer value is runtime-dead),
+     so the always-on route_a_mem_w bias soft-prefers loads through the param, the load
+     result inherits bit i, and the ret-bridge load-arm can pick the param. Applies to
+     EVERY function (main has no pointer params today, so it is unaffected in practice).
+     Flag route_a_param_cell = 0 gates BOTH the mint and the seed: no entity ids consumed,
+     nothing written -> stream-identical. State-only ops, no randomness (§5). *)
+  Definition seed_param_cells (arg_ents : list (ident * Ent)) (args_t : list typ) : GenLLVM unit
+    := if Nat.eqb route_a_param_cell 0
+       then ret tt
+       else
+         _ <- map_monad
+                (fun (p : nat * (typ * (ident * Ent))) =>
+                   let '(i, te) := p in
+                   let '(t, ie) := te in
+                   let '(_, e) := ie in
+                   match t with
+                   | TYPE_Pointer (Some _) =>
+                       cell_mint (unEnt e);;
+                       oc <- points_to_find (unEnt e);;
+                       match oc with
+                       | Some c => arg_mask_set c (N.shiftl 1 (N.of_nat i))
+                       | None => ret tt
+                       end
+                   | _ => ret tt
+                   end)
+                (List.combine (List.seq 0 (List.length arg_ents))
+                              (List.combine args_t arg_ents));;
+         ret tt.
+
   Definition gen_definition_h (name : global_id) (ret_t : typ) (args_t : list typ) : GenLLVM (definition typ (block typ * list (block typ)))
     :=
     (* Generate argument variables *)
     arg_ents <- map_monad genLocalEnt args_t;;
     (* [route-A propagation] SEED: main's args ARE the taint sources -> arg #i gets bit i (2^i).
-       Helper-function args are NOT taint sources, so gate on is_main. See ROUTE_A_IMPL §2. *)
-    (if is_main name
+       See ROUTE_A_IMPL §2.
+       [route-A chain-call] with route_a_call_seed <> 0, HELPER params are seeded the same
+       way — as a FUNCTION-LOCAL synthetic marker, NOT a real taint source (the real
+       sources are main's args only). Context scoping keeps helper-local bits invisible
+       to other functions; main's call-result mask still comes from the call site's arg
+       masks. This just makes the §2/§3 machinery treat "param-derived" as preferable
+       INSIDE the callee, so helpers actually return param-derived values. *)
+    (if orb (is_main name) (negb (Nat.eqb route_a_call_seed 0))
      then (_ <- map_monad (fun p => let '(i, ie) := p in
                                     let '(_, e) := ie in
                                     arg_mask_set (unEnt e) (N.shiftl 1 (N.of_nat i)))
                           (List.combine (List.seq 0 (List.length arg_ents)) arg_ents);;
            ret tt)
      else ret tt);;
+    (* [route-A param-cell] (r6, §4.3b) also seed the POINTEE cell of each pointer param —
+       the live half of a pointer source. Gated by route_a_param_cell (0 = stream-identical). *)
+    seed_param_cells arg_ents args_t;;
     (* [route-A #2' arg-type routing] for main, build one conversion per arg to a distinct scalar
        type (adds %c to the ctx so gen_blocks can pick them); the instrs are prepended below. *)
     seed_convs <- (if is_main name then gen_arg_type_seed arg_ents else ret []);;
@@ -3851,7 +4748,16 @@ Section InstrGenerators.
         []
     in
 
+    (* [route-A ret-bridge] arm this function's body: helpers carry their ret type +
+       insertion budget into gen_instr (via state — gen_instr cannot see ret_t
+       otherwise); main gets none (its ret value feeds no observation). *)
+    _ <- use (metadata .@ cur_ret_t');;
+    metadata .@ cur_ret_t' .= (if is_main name then (None : option typ) else Some ret_t);;
+    metadata .@ ret_bridge_budget' .= (if is_main name then 0%nat else route_a_ret_bridge);;
     bs <- gen_blocks ret_t;;
+    (* [route-A ret-bridge] disarm — don't leak into whatever is generated next. *)
+    metadata .@ cur_ret_t' .= (None : option typ);;
+    metadata .@ ret_bridge_budget' .= 0%nat;;
     (* [route-A #2'] prepend the arg-type conversions to main's entry block so the seeded
        tainted values (already in the ctx above) are actually defined at the top of main. *)
     let bs' := match seed_convs with
@@ -3873,6 +4779,19 @@ Section InstrGenerators.
       (dfn <- backtrackMetadata (gen_definition_h name ret_t args);;
        e <- add_to_global_ctx (ID_Global name, TYPE_Pointer (Some dfn.(df_prototype).(dc_type)));;
        (gen_context' .@ entl e .@ deterministic') .= false;;
+       (* [route-A callee-bias 2b] always-on recording (like vec_lanes): if this helper's
+          body loads through a pointer param, remember its REGISTERED type (identical to
+          the type just added to the ctx above) so the knob-gated 2b bias can soft-prefer
+          it. Skip main (never a callee). A single top-level modify (pure, stream-neutral:
+          prepends only when loading, identity otherwise) — invisible to knob=0
+          generation (MD5-verified), which never reads loading_fn_types. *)
+       let is_loading : bool :=
+         andb (negb (is_main name))
+              (body_loads_through_param dfn.(df_args) dfn.(df_instrs)) in
+       metadata .@ loading_fn_types' %=
+         (fun l => if is_loading
+                   then TYPE_Pointer (Some dfn.(df_prototype).(dc_type)) :: l
+                   else l);;
        ret dfn).
 
   Definition gen_new_definition (ret_t : typ) (args : list typ) : GenLLVM (definition typ (block typ * list (block typ)))
