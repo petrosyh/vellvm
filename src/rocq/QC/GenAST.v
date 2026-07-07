@@ -210,6 +210,29 @@ Section GenerationState.
   Definition all_var_contexts := (var_context * var_context * ptr_to_int_context)%type.
   Definition ContextMetadata s := Metadata s.
 
+  (* [obs-freeze] per-function freeze state (PLAN_obs-freeze.en.md §3 D1/D2).
+     fz_bits  : frozen_bits — bit i is FROZEN once it has reached an observation
+                (D1: conditional-branch condition) or entered a call as an argument
+                (D2: chain-entry). Reset at every gen_definition entry (per-function
+                scoping — helper-local bits must not leak into main and vice versa).
+     fz_heads : bit index (as Z key) -> HEAD entity id. The head is the ONE carrier
+                of a frozen bit exempt from the D1 filter (the chain baton, D2);
+                transfers per the D2 head-transfer table.
+     fz_moved : transient side-channel (same idea as cur_mask): bits whose head was
+                consumed as an operand since the last result binding. Applied at
+                add_to_local_ctx (SSA consumption -> result becomes head) or at a
+                store (-> cell becomes head); discarded at instruction boundaries
+                (consumption with no result -> headship lapses). *)
+  Record FreezeState :=
+    mkFreezeState
+      { fz_bits  : N
+      ; fz_heads : IM.Raw.t Z
+      ; fz_moved : N
+      }.
+
+  Definition freeze_empty : FreezeState :=
+    {| fz_bits := 0%N; fz_heads := IM.Raw.empty _; fz_moved := 0%N |}.
+
   Record GenState s :=
     mkGenState
     { num_void : N
@@ -271,6 +294,8 @@ Section GenerationState.
        (like vec_lanes): a pure state append, invisible to all generation-time reads
        when the knob is 0, so it does not perturb the knob=0 stream (MD5-verified). *)
     ; loading_fn_types : list typ
+    (* [obs-freeze] per-function freeze state — see the FreezeState comment above. *)
+    ; freeze_st : FreezeState
     }.
 
   Instance Default_GenState {s} : Default (GenState s)
@@ -290,6 +315,7 @@ Section GenerationState.
              ; cur_ret_t := None           (* [route-A ret-bridge] *)
              ; ret_bridge_budget := 0      (* [route-A ret-bridge] *)
              ; loading_fn_types := []      (* [route-A callee-bias 2b] *)
+             ; freeze_st := freeze_empty   (* [obs-freeze] *)
              |}
     }.
 
@@ -313,6 +339,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply num_void.
   Defined.
@@ -337,6 +364,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply num_raw.
   Defined.
@@ -361,6 +389,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply num_global.
   Defined.
@@ -385,6 +414,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply num_blocks.
   Defined.
@@ -409,6 +439,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply context.
   Defined.
@@ -433,6 +464,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply global_memo.
   Defined.
@@ -457,6 +489,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply debug_stack.
   Defined.
@@ -482,6 +515,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply arg_set.
   Defined.
@@ -506,6 +540,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply points_to.
   Defined.
@@ -531,6 +566,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply cur_mask.
   Defined.
@@ -557,6 +593,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply vec_lanes.
   Defined.
@@ -581,6 +618,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply cur_ent.
   Defined.
@@ -606,6 +644,7 @@ Section GenerationState.
         | apply x
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply cur_ret_t.
   Defined.
@@ -630,6 +669,7 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply x
         | apply (loading_fn_types s)
+        | apply (freeze_st s)
         ]; apply gs.
     - apply ret_bridge_budget.
   Defined.
@@ -655,8 +695,35 @@ Section GenerationState.
         | apply (cur_ret_t s)
         | apply (ret_bridge_budget s)
         | apply x
+        | apply (freeze_st s)
         ]; apply gs.
     - apply loading_fn_types.
+  Defined.
+
+  (* [obs-freeze] lens for the per-function freeze state. *)
+  Definition freeze_st' {s} : Lens' (GenState s) FreezeState.
+    red.
+    intros f F afa gs.
+    refine ((fun x => _) <$> afa (_ gs)); try typeclasses eauto.
+    - apply mkGenState;
+        [ apply (num_void s)
+        | apply (num_raw s)
+        | apply (num_global s)
+        | apply (num_blocks s)
+        | apply (context s)
+        | apply (global_memo s)
+        | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
+        | apply x
+        ]; apply gs.
+    - apply freeze_st.
   Defined.
 
 
@@ -965,6 +1032,211 @@ Section GenerationState.
      completion like r6); the two-intervention litmus budget is unchanged. See
      private_notes/exp_step2e/NOTES.md. *)
   Definition route_a_arg_deref : nat := 1.
+
+  (* [obs-freeze D1] (PLAN_obs-freeze.en.md §3 D1) knob for per-bit observation
+     exclusivity: 0 = OFF (every new code path dead -> stream-identical to the
+     chain-ON HEAD), 1 = SOFT (frozen-hit carriers are demoted out of the
+     tainted-preferred tiers only; unbiased fallback picks remain possible),
+     2 = HARD (frozen-hit carriers are excluded from the FULL gen_var_ent pool,
+     all branches, AND from the P0.c rows 2-6 pools). The head (D2 baton) is
+     always exempt. TRIGGERS (per-function frozen_bits |= condition mask):
+     the 4458 cond-br condition (bracketed cur_mask take, NB3) and the two
+     GENUINE loop branch conditions (loop_cond/next_cond, via arg_set[loop_init]
+     per P0.a — the 4514 select condition is NOT an observation, no trigger). *)
+  Definition route_a_obs_freeze : nat := 0.
+
+  (* [obs-freeze D2] (PLAN §3 D2) chain-entry freeze knob: 0 = OFF,
+     1 = trigger at ALL internal calls, 2 = only at PLAUSIBLE callees
+     (signature-level: a type in loading_fn_types, or a scalar-param signature).
+     Trigger: when a carrier of bit i is consumed as a call ARGUMENT the bit is
+     frozen (calls do not observe arguments — no observation budget is spent);
+     pending_ce accumulates during arg generation (= cur_mask at the peek point,
+     P0.d) and is APPLIED at call-instruction assembly (result entity minted,
+     callee fixed): frozen_bits |= pending_ce; head[b] := call result for each
+     bit (void result -> headship lapses). NOTE: rides the knob-on call path —
+     gen_call_arg/gen_call_list's arg loop is only reached when
+     route_a_ptrarg_w <> 0 (HEAD default 3), like route_a_arg_deref. *)
+  Definition route_a_ce_freeze : nat := 0.
+
+  (* Either freeze knob active? (compile-time constant; gates every new state op). *)
+  Definition freeze_on : bool :=
+    negb (andb (Nat.eqb route_a_obs_freeze 0) (Nat.eqb route_a_ce_freeze 0)).
+
+  (* ================================================================== *)
+  (* [obs-freeze] state helpers. All are pure state reads/writes — no    *)
+  (* randomness; every call site is knob-gated so the both-knobs-0       *)
+  (* stream is byte-identical to HEAD.                                   *)
+  (* ================================================================== *)
+
+  (* Set head[b] := e for every bit b of mask m. Fuel N.size m covers the MSB. *)
+  Fixpoint heads_set_aux (fuel : nat) (bit : N) (m : N) (e : Z) (h : IM.Raw.t Z)
+    {struct fuel} : IM.Raw.t Z :=
+    match fuel with
+    | O => h
+    | S f =>
+        let h' := if N.testbit m bit then IM.Raw.add (Z.of_N bit) e h else h in
+        heads_set_aux f (N.succ bit) m e h'
+    end.
+
+  Definition heads_set_bits (m : N) (e : Z) (h : IM.Raw.t Z) : IM.Raw.t Z :=
+    heads_set_aux (N.to_nat (N.size m)) 0%N m e h.
+
+  (* The bits (as a mask) whose head is exactly entity e. *)
+  Definition heads_bits_of (h : IM.Raw.t Z) (e : Z) : N :=
+    IM.Raw.fold (fun (k : Z) (he : Z) (acc : N) =>
+                   if Z.eqb he e then N.lor acc (N.shiftl 1%N (Z.to_N k)) else acc)
+                h 0%N.
+
+  (* Remove every bit of mask m from the head map (rebuild-without). *)
+  Definition heads_remove_bits (h : IM.Raw.t Z) (m : N) : IM.Raw.t Z :=
+    IM.Raw.fold (fun (k : Z) (he : Z) (acc : IM.Raw.t Z) =>
+                   if N.testbit m (Z.to_N k) then acc else IM.Raw.add k he acc)
+                h (IM.Raw.empty _).
+
+  (* Does [inter] contain a bit whose head is NOT entity e (incl. headless)? *)
+  Fixpoint freeze_hit_aux (fuel : nat) (bit : N) (inter : N) (h : IM.Raw.t Z) (e : Z)
+    {struct fuel} : bool :=
+    match fuel with
+    | O => false
+    | S f =>
+        if N.testbit inter bit
+        then match IM.Raw.find (Z.of_N bit) h with
+             | Some he => if Z.eqb he e then freeze_hit_aux f (N.succ bit) inter h e
+                          else true
+             | None => true
+             end
+        else freeze_hit_aux f (N.succ bit) inter h e
+    end.
+
+  (* THE filter predicate: carrier e (mask m) is frozen-hit iff it carries a
+     frozen bit for which it is not the head. Head-exempt = head of EVERY frozen
+     bit it carries (in hard mode a non-head frozen carrier is unpickable, so a
+     multi-frozen-bit carrier is a baton-merge result heading all of them). *)
+  Definition freeze_hit_b (frozen : N) (h : IM.Raw.t Z) (e : Z) (m : N) : bool :=
+    let inter := N.land m frozen in
+    if N.eqb inter 0%N then false
+    else freeze_hit_aux (N.to_nat (N.size inter)) 0%N inter h e.
+
+  Definition freeze_get : GenLLVM FreezeState :=
+    use (metadata .@ freeze_st').
+
+  (* Per-function reset (gen_definition_h entry; PLAN r2 Codex B1 scoping). *)
+  Definition freeze_reset : GenLLVM unit :=
+    if freeze_on
+    then metadata .@ freeze_st' .= freeze_empty;; ret tt
+    else ret tt.
+
+  (* Trigger core: frozen_bits |= m (heads untouched). *)
+  Definition freeze_or_bits (m : N) : GenLLVM unit :=
+    fz <- freeze_get;;
+    metadata .@ freeze_st' .=
+      {| fz_bits := N.lor (fz_bits fz) m
+       ; fz_heads := fz_heads fz
+       ; fz_moved := fz_moved fz |};;
+    ret tt.
+
+  (* D1 trigger (observation emission site). Gated on the D1 knob. *)
+  Definition obs_freeze_trigger (m : N) : GenLLVM unit :=
+    if Nat.eqb route_a_obs_freeze 0
+    then ret tt
+    else if N.eqb m 0%N then ret tt else freeze_or_bits m.
+
+  (* D2 head installation at call assembly: head[b] := e for all b in m. *)
+  Definition freeze_set_heads (m : N) (e : Z) : GenLLVM unit :=
+    fz <- freeze_get;;
+    metadata .@ freeze_st' .=
+      {| fz_bits := fz_bits fz
+       ; fz_heads := heads_set_bits m e (fz_heads fz)
+       ; fz_moved := fz_moved fz |};;
+    ret tt.
+
+  (* Head consumption at an operand/candidate pick (D2 transfer table,
+     per-operand-pick detection — the chain-vector cur_ent-take precedent moved
+     to the pick itself): the FIRST consumption removes the head entry and parks
+     the bits in fz_moved; the next result binding whose mask carries them takes
+     headship (add_to_local_ctx), a store moves them into the cell
+     (freeze_transfer_store), anything else lapses at the boundary. Later
+     same-round references of the stale head are ordinary frozen carriers. *)
+  Definition freeze_consume_pick (e : Z) : GenLLVM unit :=
+    if freeze_on
+    then
+      fz <- freeze_get;;
+      let consumed := N.land (heads_bits_of (fz_heads fz) e) (fz_bits fz) in
+      if N.eqb consumed 0%N
+      then ret tt
+      else
+        metadata .@ freeze_st' .=
+          {| fz_bits := fz_bits fz
+           ; fz_heads := heads_remove_bits (fz_heads fz) consumed
+           ; fz_moved := N.lor (fz_moved fz) consumed |};;
+        ret tt
+    else ret tt.
+
+  (* Read-and-clear the moved-bits channel. *)
+  Definition fz_moved_take : GenLLVM N :=
+    fz <- freeze_get;;
+    metadata .@ freeze_st' .=
+      {| fz_bits := fz_bits fz
+       ; fz_heads := fz_heads fz
+       ; fz_moved := 0%N |};;
+    ret (fz_moved fz).
+
+  (* Boundary lapse (gen_instr entry / br-condition bracket): consumption that
+     reached no result binding ends the bits' chains (dead-probe cost, D2). *)
+  Definition fz_moved_discard : GenLLVM unit :=
+    if freeze_on then _ <- fz_moved_take;; ret tt else ret tt.
+
+  (* Head transfer at a result binding: bits (fz_moved ∩ result mask) move onto
+     the new entity; bits outside the result's mask stay parked (they lapse at
+     the next boundary — e.g. a pointer-head consumed by a store's address). *)
+  Definition freeze_transfer_result (e : Z) (resmask : N) : GenLLVM unit :=
+    if freeze_on
+    then
+      fz <- freeze_get;;
+      let mv := N.land (fz_moved fz) resmask in
+      if N.eqb mv 0%N
+      then ret tt
+      else
+        metadata .@ freeze_st' .=
+          {| fz_bits := fz_bits fz
+           ; fz_heads := heads_set_bits mv e (fz_heads fz)
+           ; fz_moved := N.ldiff (fz_moved fz) mv |};;
+        ret tt
+    else ret tt.
+
+  (* Store of a head: the baton moves into the target CELL (transfer table).
+     valmask = the stored value's mask; unknown cell -> the bits lapse. *)
+  Definition freeze_transfer_store (optr : option Z) (valmask : N) : GenLLVM unit :=
+    if freeze_on
+    then match optr with
+         | None => ret tt
+         | Some p =>
+             oc <- points_to_find p;;
+             match oc with
+             | None => ret tt
+             | Some c => freeze_transfer_result c valmask
+             end
+         end
+    else ret tt.
+
+  (* [obs-freeze D1-hard] drop frozen-hit carriers (head-exempt) from a candidate
+     pool map. Pure; call sites gate on the knob (mode 2 only for gen_var_ent's
+     full pool; the rows 2-6 tainted tiers filter at any mode <> 0). *)
+  Definition freeze_filter_pool {a} (argmap : IM.Raw.t N) (fz : FreezeState)
+    (pool : IM.Raw.t a) : IM.Raw.t a :=
+    if N.eqb (fz_bits fz) 0%N
+    then pool
+    else
+      IM.Raw.fold
+        (fun (k : Z) (v : a) (acc : IM.Raw.t a) =>
+           let m := match IM.Raw.find k argmap with
+                    | Some mv => mv
+                    | None => 0%N
+                    end in
+           if freeze_hit_b (fz_bits fz) (fz_heads fz) k m
+           then acc
+           else IM.Raw.add k v acc)
+        pool (IM.Raw.empty _).
 
   (* #[global] Instance STGST : Monad (stateT GenState G). *)
   (* apply Monad_stateT. *)
@@ -1625,6 +1897,9 @@ Section TypGenerators.
           then reset the accumulator for the next instruction. See ROUTE_A_IMPL §2. *)
        m <- cur_mask_take;;
        arg_mask_set (unEnt e) m;;
+       (* [obs-freeze D2 transfer] SSA consumption of a head: the result whose mask
+          carries the moved bits becomes their new head (gated; no-op at knobs 0). *)
+       freeze_transfer_result (unEnt e) m;;
        ret e.
 
   Definition genLocalEnt (τ : typ) : GenLLVM (ident * Ent)
@@ -2633,7 +2908,16 @@ Section ExpGenerators.
   (* Generate an entity to a variable *)
   Definition gen_var_ent {a b}
     (focus : Lens' (SystemState GenState G) (IM.Raw.t a)) (filter : GenQuery b) : GenLLVM (option Ent)
-    := focused <- use focus;;
+    := focused_all <- use focus;;
+       (* [obs-freeze D1-hard] mode 2: exclude frozen-hit carriers (head-exempt)
+          from the FULL candidate pool, ahead of ALL branches below (tainted
+          subset, b=0/None fallbacks, bias_w=0 path). mode 0/1: pool untouched
+          (soft demotes from the tainted-preferred tier only — below). *)
+       focused <- (if Nat.eqb route_a_obs_freeze 2
+                   then argmap_f <- use (metadata .@ arg_set');;
+                        fz <- freeze_get;;
+                        ret (freeze_filter_pool argmap_f fz focused_all)
+                   else ret focused_all);;
        (* [route-A bias] soft-prefer tainted (arg-derived) candidates. See ROUTE_A_IMPL §3-bias.
           Build the tainted subset (arg_set != 0) of the candidates, pick from it, and keep
           that pick with prob w/(w+1); otherwise fall back to the original unbiased pick (so
@@ -2644,11 +2928,24 @@ Section ExpGenerators.
               then gen_IntMapRaw_ent_filter focused filter
               else
                 argmap <- use (metadata .@ arg_set');;
+                (* [obs-freeze D1-soft] mode 1: demote frozen-hit carriers out of
+                   the tainted-preferred tier only (fallback picks untouched). *)
+                ofz <- (if Nat.eqb route_a_obs_freeze 1
+                        then fz <- freeze_get;; ret (Some fz)
+                        else ret (None : option FreezeState));;
                 let tainted :=
                   IM.Raw.fold
                     (fun (k : Z) v acc =>
                        match IM.Raw.find k argmap with
-                       | Some m => if N.eqb m 0%N then acc else IM.Raw.add k v acc
+                       | Some m =>
+                           if N.eqb m 0%N then acc
+                           else match ofz with
+                                | Some fz =>
+                                    if freeze_hit_b (fz_bits fz) (fz_heads fz) k m
+                                    then acc
+                                    else IM.Raw.add k v acc
+                                | None => IM.Raw.add k v acc
+                                end
                        | None => acc
                        end) focused (IM.Raw.empty _) in
                 oe_t <- gen_IntMapRaw_ent_filter tainted filter;;
@@ -2667,7 +2964,10 @@ Section ExpGenerators.
           no randomness consumed. *)
        (match oe with
         | Some e => cur_mask_accum (unEnt e);;
-                    cur_ent_set (unEnt e)
+                    cur_ent_set (unEnt e);;
+                    (* [obs-freeze D2 transfer] per-operand-pick head-consumption
+                       detection (gated; no-op at knobs 0). *)
+                    freeze_consume_pick (unEnt e)
         | None => ret tt
         end);;
        ret oe.
@@ -3214,7 +3514,17 @@ Section InstrGenerators.
       match ovec with
       | None => uniform
       | Some ve =>
-          lanes <- vec_lanes_find ve;;
+          lanes0 <- vec_lanes_find ve;;
+          (* [obs-freeze D1] the recorded-lane read is a tainted-preferred tier
+             (P0.c row 5): drop lanes whose mask is frozen-hit (carrier entity =
+             the vector [ve]; head-exempt). Any mode <> 0; empty -> uniform. *)
+          lanes <- (if Nat.eqb route_a_obs_freeze 0
+                    then ret lanes0
+                    else fz <- freeze_get;;
+                         ret (List.filter
+                                (fun (lm : Z * N) =>
+                                   negb (freeze_hit_b (fz_bits fz) (fz_heads fz) ve (snd lm)))
+                                lanes0));;
           match lanes with
           | [] => uniform
           | _ :: _ =>
@@ -3582,9 +3892,21 @@ Section InstrGenerators.
       am <- use (metadata .@ arg_set');;
       locals <- use (gen_context' .@ is_local');;
       globals <- use (gen_context' .@ is_global');;
+      (* [obs-freeze D1] this cell scan is a tainted-preferred tier (P0.c row 2,
+         one filter point covers all 3 callers): at any mode <> 0 exclude cells
+         whose content mask is frozen-hit (head-exempt — a cell can be a head
+         via the store->cell transfer). *)
+      ofz <- (if Nat.eqb route_a_obs_freeze 0
+              then ret (None : option FreezeState)
+              else fz <- freeze_get;; ret (Some fz));;
       let tainted_cell (c : Z) : bool :=
         match IM.Raw.find c am with
-        | Some m => negb (N.eqb m 0%N)
+        | Some m =>
+            andb (negb (N.eqb m 0%N))
+                 (match ofz with
+                  | Some fz => negb (freeze_hit_b (fz_bits fz) (fz_heads fz) c m)
+                  | None => true
+                  end)
         | None => false
         end in
       let in_scope (p : Z) : bool :=
@@ -3625,6 +3947,8 @@ Section InstrGenerators.
                 | Some nm =>
                     cur_mask_accum p;;
                     cur_ent_set p;;
+                    (* [obs-freeze D2 transfer] pointer-pick head consumption. *)
+                    freeze_consume_pick p;;
                     ret (Some nm)
                 end
           end
@@ -3656,11 +3980,21 @@ Section InstrGenerators.
             | TYPE_Struct _ | TYPE_Packed_struct _ =>
                 am <- use (metadata .@ arg_set');;
                 locals <- use (gen_context' .@ is_local');;
+                (* [obs-freeze D1] tainted-source scan = tainted-preferred tier
+                   (P0.c row 4): any mode <> 0 excludes frozen-hit carriers
+                   (head-exempt). *)
+                ofz <- (if Nat.eqb route_a_obs_freeze 0
+                        then ret (None : option FreezeState)
+                        else fz <- freeze_get;; ret (Some fz));;
                 let tainted_local (k : Z) (m : N) : bool :=
-                  andb (negb (N.eqb m 0%N))
-                       (match IM.Raw.find k locals with
-                        | Some _ => true
-                        | None => false
+                  andb (andb (negb (N.eqb m 0%N))
+                             (match IM.Raw.find k locals with
+                              | Some _ => true
+                              | None => false
+                              end))
+                       (match ofz with
+                        | Some fz => negb (freeze_hit_b (fz_bits fz) (fz_heads fz) k m)
+                        | None => true
                         end) in
                 let cand0 := IM.Raw.fold
                                (fun k m acc => if tainted_local k m then k :: acc else acc)
@@ -3702,6 +4036,9 @@ Section InstrGenerators.
     | None => ret None
     | Some nm =>
         cur_mask_accum k;;
+        (* [obs-freeze D2 transfer] source consumption (P0.c row 6 sites draw via
+           the row 3/4 pools; the pick itself lands here). Gated no-op at knobs 0. *)
+        freeze_consume_pick k;;
         let cv := match st, tgt with
                   | TYPE_I n, TYPE_I m => if Pos.ltb m n then Trunc else Sext
                   | _, TYPE_Float | _, TYPE_Double => Sitofp
@@ -3765,7 +4102,10 @@ Section InstrGenerators.
                      match oc with
                      | None => ret tt
                      | Some c => cm <- arg_mask_lookup c;;
-                                 cur_mask_accum_mask cm
+                                 cur_mask_accum_mask cm;;
+                                 (* [obs-freeze D2 transfer] load from a head CELL:
+                                    the load result binding takes the baton. *)
+                                 freeze_consume_pick c
                      end
          | None => ret tt
          end);;
@@ -3792,6 +4132,7 @@ Section InstrGenerators.
         obase <- cur_ent_take;;
         lane <- lift_GenLLVM (choose (0, Z.of_N (sz - 1)));;
         cur_mask_accum (unEnt ee);;
+        freeze_consume_pick (unEnt ee);;  (* [obs-freeze D2 transfer] *)
         em <- arg_mask_lookup (unEnt ee);;
         '(inm, ie) <- genLocalEnt rt;;
         vec_lanes_update (unEnt ie) obase lane em;;
@@ -3810,6 +4151,7 @@ Section InstrGenerators.
     | Some (enm, ee, ecode) =>
         eagg <- gen_exp_sz0 rt;;
         cur_mask_accum (unEnt ee);;
+        freeze_consume_pick (unEnt ee);;  (* [obs-freeze D2 transfer] *)
         '(inm, _) <- genLocalEnt rt;;
         ret ((ecode ++ [(IId (ident_to_raw_id inm),
               INSTR_Op (OP_InsertValue (rt, eagg) (ft, EXP_Ident enm) [idx]))])%list)
@@ -3862,7 +4204,10 @@ Section InstrGenerators.
                  match oc with
                  | None => ret tt
                  | Some c => cm <- arg_mask_lookup c;;
-                             cur_mask_accum_mask cm
+                             cur_mask_accum_mask cm;;
+                             (* [obs-freeze D2 transfer] load from a head CELL:
+                                the load result binding takes the baton. *)
+                             freeze_consume_pick c
                  end
              end);;
        vol <- lift (arbitrary : G bool);;
@@ -3903,6 +4248,9 @@ Section InstrGenerators.
        s <- gen_store_to (tptr, eptr);;
        m <- cur_mask_take;;
        cell_mask_record optr m;;
+       (* [obs-freeze D2 transfer] store of a head: the baton moves into the target
+          CELL (bits outside the stored value's mask lapse at the boundary). *)
+       freeze_transfer_store optr m;;
        ret s).
 
   (* [route-A ptr-arg] find a tainted int-typed LOCAL in scope usable as the source of
@@ -3913,11 +4261,20 @@ Section InstrGenerators.
   Definition gen_ptrarg_int_source (tgt : typ) : GenLLVM (option (Z * typ)) :=
     am <- use (metadata .@ arg_set');;
     locals <- use (gen_context' .@ is_local');;
+    (* [obs-freeze D1] tainted-source scan = tainted-preferred tier (P0.c row 3):
+       any mode <> 0 excludes frozen-hit carriers (head-exempt). *)
+    ofz <- (if Nat.eqb route_a_obs_freeze 0
+            then ret (None : option FreezeState)
+            else fz <- freeze_get;; ret (Some fz));;
     let tainted_local (k : Z) (m : N) : bool :=
-      andb (negb (N.eqb m 0%N))
-           (match IM.Raw.find k locals with
-            | Some _ => true
-            | None => false
+      andb (andb (negb (N.eqb m 0%N))
+                 (match IM.Raw.find k locals with
+                  | Some _ => true
+                  | None => false
+                  end))
+           (match ofz with
+            | Some fz => negb (freeze_hit_b (fz_bits fz) (fz_heads fz) k m)
+            | None => true
             end) in
     let cand0 := IM.Raw.fold
                    (fun k m acc => if tainted_local k m then k :: acc else acc)
@@ -3956,6 +4313,7 @@ Section InstrGenerators.
         obase <- cur_ent_take;;
         lane <- lift_GenLLVM (choose (0, Z.of_N (sz - 1)));;
         cur_mask_accum (unEnt ee);;
+        freeze_consume_pick (unEnt ee);;  (* [obs-freeze D2 transfer] *)
         em <- arg_mask_lookup (unEnt ee);;
         '(inm, ie) <- genLocalEnt rt;;
         vec_lanes_update (unEnt ie) obase lane em;;
@@ -3976,6 +4334,7 @@ Section InstrGenerators.
     | Some (enm, ee, ecode) =>
         eagg <- gen_exp_sz0 rt;;
         cur_mask_accum (unEnt ee);;
+        freeze_consume_pick (unEnt ee);;  (* [obs-freeze D2 transfer] *)
         '(inm, ie) <- genLocalEnt rt;;
         ret (Some (inm, ie, (ecode ++ [(IId (ident_to_raw_id inm),
               INSTR_Op (OP_InsertValue (rt, eagg) (ft, EXP_Ident enm) [idx]))])%list))
@@ -4035,6 +4394,29 @@ Section InstrGenerators.
     | _ => ret None
     end.
 
+  (* [route-A callee-bias] scalar-param predicate (2a). Robust to an unwrapped
+     TYPE_Function and to normalization (checked on the normalized signature).
+     [obs-freeze] MOVED UP (textually) unchanged: gen_call_list's D2 mode-2
+     plausibility check needs fptr_has_scalar_param before its old position. *)
+  Definition is_scalar_typ (t : typ) : bool :=
+    match t with
+    | TYPE_I _ | TYPE_Float | TYPE_Double => true
+    | _ => false
+    end.
+
+  Definition fptr_arg_typs (t : typ) : option (list typ) :=
+    match t with
+    | TYPE_Pointer (Some (TYPE_Function _ args _)) => Some args
+    | TYPE_Function _ args _ => Some args
+    | _ => None
+    end.
+
+  Definition fptr_has_scalar_param (t : typ) : bool :=
+    match fptr_arg_typs t with
+    | Some args => existsb is_scalar_typ args
+    | None => false
+    end.
+
   (* [route-A arg-deref] (PLAN §4.3c) core: OR the pointee cell's content mask
      (arg_set[points_to[p]] — ONE indirection level, the shadow's object granularity)
      into the cur_mask accumulator that add_to_local_ctx assigns to the call result, so
@@ -4044,7 +4426,12 @@ Section InstrGenerators.
     oc <- points_to_find p;;
     match oc with
     | None => ret tt
-    | Some c => m <- arg_mask_lookup c;; cur_mask_accum_mask m
+    | Some c => m <- arg_mask_lookup c;;
+                cur_mask_accum_mask m;;
+                (* [obs-freeze D2 transfer] the pointee cell's mask flows into the
+                   call result: a head CELL is consumed here (M1 / ordinary ptr-arg
+                   paths); the call-result binding takes the baton. Gated no-op. *)
+                freeze_consume_pick c
     end.
 
   (* [route-A arg-deref] (PLAN §4.3c) ordinary / retro-mint settle paths: [oent] is the
@@ -4134,6 +4521,10 @@ Section InstrGenerators.
                   sid <- genVoid;;
                   vmask <- arg_mask_lookup (unEnt ve);;
                   cell_mask_record optr vmask;;
+                  (* [obs-freeze D2 transfer] the M2 pre-call store moves the built
+                     value's headship (if any) into the pointer's cell. *)
+                  freeze_consume_pick (unEnt ve);;
+                  freeze_transfer_store optr vmask;;
                   cur_mask_accum_mask saved;;
                   (* [route-A arg-deref] (PLAN §4.3c) settle path (b) with M2: this deref
                      runs AFTER cell_mask_record, so arg_set[points_to[optr]] already holds
@@ -4170,7 +4561,40 @@ Section InstrGenerators.
             let prestores := List.concat (map snd results) in
             let args_with_params := map (fun arg => (arg, [])) args_texp in
             efun <- gen_exp_possibly_non_deterministic_sz0 tfun;;
-            id <- genInstrId ret_t;;
+            (* [obs-freeze D2] pending_ce: at this point cur_mask = OR of the
+               scalar arg-pick masks + the arg_deref-reflected pointee-cell masks
+               (P0.d verified) = exactly the union D2 wants. PEEK, not take — the
+               accumulator must still feed the call result's arg_set below. *)
+            pending_ce <- (if Nat.eqb route_a_ce_freeze 0
+                           then ret 0%N
+                           else use (metadata .@ cur_mask'));;
+            (* stream-neutral swap genInstrId -> genInstrIdEnt (result entity is
+               needed as the head; identical mint & randomness). *)
+            '(id, res_e) <- genInstrIdEnt ret_t;;
+            (* [obs-freeze D2] deferred application at call assembly (result
+               entity minted, callee fixed). Mode 2 = signature-level
+               plausibility: a type in loading_fn_types, or a scalar-param
+               signature (over-approximation across same-signature helpers).
+               Void result: bits freeze with NO head (headship lapses). *)
+            (if Nat.eqb route_a_ce_freeze 0
+             then ret tt
+             else
+               if N.eqb pending_ce 0%N
+               then ret tt
+               else
+                 plausible <- (if Nat.eqb route_a_ce_freeze 2
+                               then loading <- use (metadata .@ loading_fn_types');;
+                                    ret (orb (existsb (fun lt => normalized_typ_eq tfun lt) loading)
+                                             (fptr_has_scalar_param tfun))
+                               else ret true);;
+                 if (plausible : bool)
+                 then
+                   freeze_or_bits pending_ce;;
+                   match ret_t with
+                   | TYPE_Void => ret tt
+                   | _ => freeze_set_heads pending_ce (unEnt res_e)
+                   end
+                 else ret tt);;
             ret ((prestores
                   ++ [(id, INSTR_Call (TYPE_Function ret_t args varargs, efun) args_with_params [])])%list)
         | _ => failGen "gen_call_list"
@@ -4224,27 +4648,6 @@ Section InstrGenerators.
     := genMatch
          (use (gen_context' .@ is_vector'))
          (queryl variable_type').
-
-  (* [route-A callee-bias] scalar-param predicate (2a). Robust to an unwrapped
-     TYPE_Function and to normalization (checked on the normalized signature). *)
-  Definition is_scalar_typ (t : typ) : bool :=
-    match t with
-    | TYPE_I _ | TYPE_Float | TYPE_Double => true
-    | _ => false
-    end.
-
-  Definition fptr_arg_typs (t : typ) : option (list typ) :=
-    match t with
-    | TYPE_Pointer (Some (TYPE_Function _ args _)) => Some args
-    | TYPE_Function _ args _ => Some args
-    | _ => None
-    end.
-
-  Definition fptr_has_scalar_param (t : typ) : bool :=
-    match fptr_arg_typs t with
-    | Some args => existsb is_scalar_typ args
-    | None => false
-    end.
 
   (* [route-A callee-bias] soft-prefer a function-pointer TYPE among candidates matching
      [filter]: with prob w/(w+1) return the filtered pick; on the 1/(w+1) draw OR an empty
@@ -4311,6 +4714,15 @@ Section InstrGenerators.
        id <- genInstrId τ;;
        ret (id, i).
 
+  (* [obs-freeze P0.a] Ent-returning variant — stream-neutral by construction:
+     the same genLocalEnt mint via genInstrIdEnt, only additionally RETURNING the
+     already-minted entity. Used by gen_loop_sz for loop_init (its arg_set mask is
+     the ONE mask every loop-control value roots at). *)
+  Definition gen_op_instr_of_typ_ent (τ : typ) : GenLLVM (instr_id * instr typ * Ent)
+    := i <- ret INSTR_Op <*> gen_op τ;;
+       '(id, e) <- genInstrIdEnt τ;;
+       ret (id, i, e).
+
   Definition gen_op_instr : GenLLVM (instr_id * instr typ)
     := τ <- gen_op_typ;;
        gen_op_instr_of_typ τ.
@@ -4360,6 +4772,9 @@ Section InstrGenerators.
       (_ <- cur_mask_take;;
        (* [route-A chain-vector] same boundary reset for the last-pick side-channel. *)
        _ <- cur_ent_take;;
+       (* [obs-freeze D2 transfer] boundary lapse: moved bits that reached no
+          result binding end their chains here (gated no-op at knobs 0). *)
+       fz_moved_discard;;
        ointtoptr_info <- gen_inttoptr_info;;
        osized_ptr_typ <- gen_sized_ptr_type;;
        ovalid_ptr_vecptr <- gen_valid_ptr_vecptr_ent;;
@@ -4390,6 +4805,9 @@ Section InstrGenerators.
                              store <- gen_store_to (TYPE_Pointer (Some t), EXP_Ident id);;
                              m <- cur_mask_take;;
                              cell_mask_record (Some (unEnt e)) m;;
+                             (* [obs-freeze D2 transfer] init store of a head value:
+                                the baton moves into the fresh alloca's cell. *)
+                             freeze_transfer_store (Some (unEnt e)) m;;
                              ret [(IId (ident_to_raw_id id), INSTR_Alloca t []); store]]) osized_typ
             ++ maybe [] (fun t => fmap (fun x => [x]) <$> [gen_load t; gen_store t; gen_gep t]) osized_ptr_typ
             ++ maybe [] (fun '(e, t) => [(fun x => [x]) <$> gen_ptrtoint e t]) ovalid_ptr_vecptr
@@ -4455,7 +4873,21 @@ Section InstrGenerators.
                  (* Conditional branch, with no backloops *)
              ; (min sz' 6%nat,
                  fun _ =>
+                   (* [obs-freeze D1] bracketed cur_mask take around the condition
+                      (NB3 discipline): discard the residue BEFORE, read the
+                      condition's own mask AFTER, trigger the freeze. Gated: at
+                      knob 0 nothing here runs. *)
+                   (if Nat.eqb route_a_obs_freeze 0
+                    then ret tt
+                    else _ <- cur_mask_take;; ret tt);;
                    c <- gen_exp_sz0 (TYPE_I 1);;
+                   (if Nat.eqb route_a_obs_freeze 0
+                    then ret tt
+                    else cm <- cur_mask_take;;
+                         obs_freeze_trigger cm;;
+                         (* the condition position consumes with NO result:
+                            headship of consumed heads lapses (transfer table). *)
+                         fz_moved_discard);;
 
                    (* Generate first branch *)
                    (* We backtrack contexts so blocks in second branch *)
@@ -4505,29 +4937,62 @@ Section InstrGenerators.
          (bound : LLVMAst.int_ast) {struct t} : GenLLVM (terminator typ * (block typ * list (block typ)))
        :=
          bid_entry <- new_block_id;;
+         (* [obs-freeze D1/P0.a] residue guard: a trailing void-result instruction
+            (e.g. a void call) can leave cur_mask residue that would inflate
+            arg_set[loop_init]. Gated (knob 0: untouched). *)
+         (if Nat.eqb route_a_obs_freeze 0
+          then ret tt
+          else _ <- cur_mask_take;; ret tt);;
          (* TODO: make it so I can generate constant expressions *)
-         '(loop_init_instr_id, loop_init_instr) <- gen_op_instr_of_typ (TYPE_I 32) (* TODO: big ints *);;
+         (* [obs-freeze P0.a] stream-neutral Ent-returning swap (loop_init's mask is
+            ALREADY correct at HEAD — its operand picks pass gen_var_ent). *)
+         '(loop_init_instr_id, loop_init_instr, loop_init_ent) <- gen_op_instr_of_typ_ent (TYPE_I 32) (* TODO: big ints *);;
          let loop_init_instr_raw_id := instr_id_to_raw_id "loop init id" loop_init_instr_id in
+         (* [obs-freeze D1/P0.a] the ONE mask that matters: every loop-control value
+            roots at loop_init (+constants). Pure read; gated to 0 at knob 0. *)
+         m_init <- (if Nat.eqb route_a_obs_freeze 0
+                    then ret 0%N
+                    else arg_mask_lookup (unEnt loop_init_ent));;
          bound' <- lift_GenLLVM (choose (0, bound));;
-         let gen_icmp (τ : typ) : GenLLVM (instr_id * instr typ) :=
-           iid <- genInstrId (TYPE_I 1);;
-           ret (iid, INSTR_Op (OP_ICmp Ule τ (EXP_Ident (ID_Local loop_init_instr_raw_id)) (EXP_Integer bound')))
+         let gen_icmp (τ : typ) : GenLLVM (instr_id * instr typ * Ent) :=
+           '(iid, ie) <- genInstrIdEnt (TYPE_I 1);;
+           ret (iid, INSTR_Op (OP_ICmp Ule τ (EXP_Ident (ID_Local loop_init_instr_raw_id)) (EXP_Integer bound')), ie)
          in
-         '(loop_cmp_id, loop_cmp) <- gen_icmp (TYPE_I 32);; (* TODO: big ints *)
+         '(loop_cmp_id, loop_cmp, loop_cmp_ent) <- gen_icmp (TYPE_I 32);; (* TODO: big ints *)
+         (* [obs-freeze D1/P0.a] knob-gated mask propagation onto the hand-assembled
+            temporaries (their operands bypass gen_var_ent, so their arg_set holds
+            0 at HEAD; overwriting is REQUIRED for next_instr's spurious residue).
+            Gated because arg_set feeds the always-on §3 bias. *)
+         (if Nat.eqb route_a_obs_freeze 0 then ret tt
+          else arg_mask_set (unEnt loop_cmp_ent) m_init);;
          let loop_cmp_raw_id := instr_id_to_raw_id "loop_cmp_id" loop_cmp_id in
-         let gen_select (τ : typ) : GenLLVM (instr_id * instr typ) :=
+         let gen_select (τ : typ) : GenLLVM (instr_id * instr typ * Ent) :=
            let lower_exp := OP_Select (TYPE_I 1, (EXP_Ident (ID_Local loop_cmp_raw_id)))
                               (τ, (EXP_Ident (ID_Local loop_init_instr_raw_id)))
                               (τ, EXP_Integer bound') in
-           iid <- genInstrId τ;;
-           ret (iid, INSTR_Op lower_exp)
+           '(iid, ie) <- genInstrIdEnt τ;;
+           ret (iid, INSTR_Op lower_exp, ie)
          in
-         '(select_id, select_instr) <- gen_select (TYPE_I 32);;
+         '(select_id, select_instr, select_ent) <- gen_select (TYPE_I 32);;
+         (if Nat.eqb route_a_obs_freeze 0 then ret tt
+          else arg_mask_set (unEnt select_ent) m_init);;
          let loop_final_init_id_raw := instr_id_to_raw_id "loop iterator id" select_id in
-         '(loop_cond_id, loop_cond) <-
+         '(loop_cond_id, loop_cond, loop_cond_ent) <-
            (let loop_cond_exp := INSTR_Op (OP_ICmp Ugt (TYPE_I 32 (* TODO: big ints *)) (EXP_Ident (ID_Local loop_final_init_id_raw)) (EXP_Integer 0)) in
-           iid <- genInstrId (TYPE_I 1);;
-           ret (iid, loop_cond_exp));;
+           '(iid, ie) <- genInstrIdEnt (TYPE_I 1);;
+           ret (iid, loop_cond_exp, ie));;
+         (* [obs-freeze D1] GENUINE observation site #2: the entry-block br (blk_term
+            below, on loop_cond). frozen_bits is function-global and MONOTONE in v0,
+            so triggering here — where the br's condition data is fixed — equals
+            triggering at assembly, and correctly precedes generation of every block
+            beyond this br. The 4514-select condition (loop_cmp) is NOT an
+            observation: no trigger there. The observation consumes the
+            loop_init-rooted chain with no result: heads riding it lapse. *)
+         (if Nat.eqb route_a_obs_freeze 0 then ret tt
+          else arg_mask_set (unEnt loop_cond_ent) m_init;;
+               obs_freeze_trigger m_init;;
+               freeze_consume_pick (unEnt loop_init_ent);;
+               fz_moved_discard);;
 
          let entry_code : list (instr_id * instr typ) := [(loop_init_instr_id, loop_init_instr); (loop_cmp_id, loop_cmp); (select_id, select_instr); (loop_cond_id, loop_cond)] in
 
@@ -4543,14 +5008,29 @@ Section InstrGenerators.
 
                    (* Block for controlling the next iteration of the loop *)
                    '(next_instr_id, next_instr) <-
-                     (iid <- genLocal (TYPE_I 32);;
+                     ((* [obs-freeze D1/P0.a] residue guard: at HEAD next_instr's
+                         arg_set takes whatever cur_mask the end-block generation
+                         left (spurious-but-inert residue) — under the knob, discard
+                         it and OVERWRITE with m_init below. *)
+                      (if Nat.eqb route_a_obs_freeze 0
+                       then ret tt
+                       else _ <- cur_mask_take;; ret tt);;
+                      '(iid, ie) <- genLocalEnt (TYPE_I 32);;   (* stream-neutral genLocal swap *)
+                      (if Nat.eqb route_a_obs_freeze 0 then ret tt
+                       else arg_mask_set (unEnt ie) m_init);;
                       let next_exp := OP_IBinop (Sub false false) (TYPE_I 32 (* TODO: big ints *)) (EXP_Ident (ID_Local phi_id)) (EXP_Integer 1) in
                       ret (IId (ident_to_raw_id iid), INSTR_Op next_exp));;
                    let next_instr_raw_id := instr_id_to_raw_id "next_exp" next_instr_id in
 
                    '(next_cond_id, next_cond) <-
                      (let next_cond_exp := OP_ICmp Ugt (TYPE_I 32 (* TODO: big ints *)) (EXP_Ident (ID_Local next_instr_raw_id)) (EXP_Integer 0) in
-                      iid <- genInstrId (TYPE_I 1);;
+                      '(iid, ie) <- genInstrIdEnt (TYPE_I 1);;   (* stream-neutral swap *)
+                      (* [obs-freeze D1] GENUINE observation site #3: the next-block
+                         br (blk_term below, on next_cond). Same monotonicity
+                         argument as the entry-block trigger. *)
+                      (if Nat.eqb route_a_obs_freeze 0 then ret tt
+                       else arg_mask_set (unEnt ie) m_init;;
+                            obs_freeze_trigger m_init);;
                       ret (iid, INSTR_Op next_cond_exp));;
                    let next_cond_raw_id := instr_id_to_raw_id "next_cond_exp" next_cond_id in
 
@@ -4715,6 +5195,10 @@ Section InstrGenerators.
 
   Definition gen_definition_h (name : global_id) (ret_t : typ) (args_t : list typ) : GenLLVM (definition typ (block typ * list (block typ)))
     :=
+    (* [obs-freeze] per-function freeze scoping (r2 Codex B1): reset at every
+       definition entry — helper freeze events must not leak into main's freeze
+       state and vice versa. Gated no-op at knobs 0. *)
+    freeze_reset;;
     (* Generate argument variables *)
     arg_ents <- map_monad genLocalEnt args_t;;
     (* [route-A propagation] SEED: main's args ARE the taint sources -> arg #i gets bit i (2^i).
