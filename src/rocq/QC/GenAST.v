@@ -228,10 +228,23 @@ Section GenerationState.
       { fz_bits  : N
       ; fz_heads : IM.Raw.t Z
       ; fz_moved : N
+      (* [param-obs-ban] per-function param provenance + transient
+         observation-context flag. fz_param = OR of the seed bits of the
+         CURRENT (non-main) function's formals (0 in main / at reset). fz_pob_on
+         = a transient flag set ONLY around the observation-feeding pick sites
+         (S1 the cond-br condition, S2 loop_init's operands): while true, the
+         ban's hard filter in gen_var_ent drops candidates carrying any bit of
+         fz_param. Both live here (rather than in a new GenState field) so they
+         ride the existing freeze_st' lens — no extra lens plumbing. They are
+         INDEPENDENT of the freeze knobs: written only under route_a_param_obs_ban
+         <> 0, read only under the same gate, so both-off is byte-identical. *)
+      ; fz_param  : N
+      ; fz_pob_on : bool
       }.
 
   Definition freeze_empty : FreezeState :=
-    {| fz_bits := 0%N; fz_heads := IM.Raw.empty _; fz_moved := 0%N |}.
+    {| fz_bits := 0%N; fz_heads := IM.Raw.empty _; fz_moved := 0%N
+     ; fz_param := 0%N; fz_pob_on := false |}.
 
   Record GenState s :=
     mkGenState
@@ -1062,6 +1075,24 @@ Section GenerationState.
   Definition freeze_on : bool :=
     negb (andb (Nat.eqb route_a_obs_freeze 0) (Nat.eqb route_a_ce_freeze 0)).
 
+  (* [param-obs-ban D1] (PLAN_param-obs-ban §3-D1) unconditional ban knob:
+     0 = OFF (stream-identical to HEAD), 1 = ON. When on, a helper NEVER
+     observes its own parameters: at the two observation-feeding pick contexts
+     — S1 the cond-br condition (~gen_terminator_sz) and S2 loop_init's operand
+     picks (gen_loop_sz) — every candidate whose arg-provenance mask intersects
+     the current function's param bits (fz_param) is HARD-excluded from the pool.
+     Ret / store / select-cond / call-arg picks are NOT observations and are
+     untouched (the ret channel is the mutant's through-cut, preserved for g4).
+     Preconditions (PLAN NB4): route_a_call_seed<>0 (else no param bits are
+     seeded -> ban vacuous) and route_a_mem_w<>0 (stored-param->cell->reload
+     route keeps mask coverage); both hold at HEAD defaults. INDEPENDENT of the
+     freeze knobs — own key (fz_param), own gate, own sites. *)
+  Definition route_a_param_obs_ban : nat := 0.
+
+  (* Compile-time gate for every ban state op / pool filter. *)
+  Definition param_ban_on : bool :=
+    negb (Nat.eqb route_a_param_obs_ban 0).
+
   (* ================================================================== *)
   (* [obs-freeze] state helpers. All are pure state reads/writes — no    *)
   (* randomness; every call site is knob-gated so the both-knobs-0       *)
@@ -1132,7 +1163,8 @@ Section GenerationState.
     metadata .@ freeze_st' .=
       {| fz_bits := N.lor (fz_bits fz) m
        ; fz_heads := fz_heads fz
-       ; fz_moved := fz_moved fz |};;
+       ; fz_moved := fz_moved fz
+       ; fz_param := fz_param fz ; fz_pob_on := fz_pob_on fz |};;
     ret tt.
 
   (* D1 trigger (observation emission site). Gated on the D1 knob. *)
@@ -1147,7 +1179,8 @@ Section GenerationState.
     metadata .@ freeze_st' .=
       {| fz_bits := fz_bits fz
        ; fz_heads := heads_set_bits m e (fz_heads fz)
-       ; fz_moved := fz_moved fz |};;
+       ; fz_moved := fz_moved fz
+       ; fz_param := fz_param fz ; fz_pob_on := fz_pob_on fz |};;
     ret tt.
 
   (* Head consumption at an operand/candidate pick (D2 transfer table,
@@ -1168,7 +1201,8 @@ Section GenerationState.
         metadata .@ freeze_st' .=
           {| fz_bits := fz_bits fz
            ; fz_heads := heads_remove_bits (fz_heads fz) consumed
-           ; fz_moved := N.lor (fz_moved fz) consumed |};;
+           ; fz_moved := N.lor (fz_moved fz) consumed
+           ; fz_param := fz_param fz ; fz_pob_on := fz_pob_on fz |};;
         ret tt
     else ret tt.
 
@@ -1178,7 +1212,8 @@ Section GenerationState.
     metadata .@ freeze_st' .=
       {| fz_bits := fz_bits fz
        ; fz_heads := fz_heads fz
-       ; fz_moved := 0%N |};;
+       ; fz_moved := 0%N
+       ; fz_param := fz_param fz ; fz_pob_on := fz_pob_on fz |};;
     ret (fz_moved fz).
 
   (* Boundary lapse (gen_instr entry / br-condition bracket): consumption that
@@ -1200,7 +1235,8 @@ Section GenerationState.
         metadata .@ freeze_st' .=
           {| fz_bits := fz_bits fz
            ; fz_heads := heads_set_bits mv e (fz_heads fz)
-           ; fz_moved := N.ldiff (fz_moved fz) mv |};;
+           ; fz_moved := N.ldiff (fz_moved fz) mv
+           ; fz_param := fz_param fz ; fz_pob_on := fz_pob_on fz |};;
         ret tt
     else ret tt.
 
@@ -1236,6 +1272,57 @@ Section GenerationState.
            if freeze_hit_b (fz_bits fz) (fz_heads fz) k m
            then acc
            else IM.Raw.add k v acc)
+        pool (IM.Raw.empty _).
+
+  (* ================================================================== *)
+  (* [param-obs-ban] state helpers. Pure state reads/writes; every call    *)
+  (* site is gated on param_ban_on so the knob-0 stream is byte-identical.  *)
+  (* Reuse freeze_get (the freeze_st' accessor) — fz_param/fz_pob_on live   *)
+  (* in the same record.                                                    *)
+  (* ================================================================== *)
+
+  (* Per-function capture (gen_definition_h): set fz_param := m and clear the
+     transient context flag. Overwrites unconditionally so nothing leaks across
+     function boundaries; preserves the freeze fields (empty in arm B, live in
+     arm C where freeze_reset already ran first). *)
+  Definition pob_set_param (m : N) : GenLLVM unit :=
+    fz <- freeze_get;;
+    metadata .@ freeze_st' .=
+      {| fz_bits := fz_bits fz
+       ; fz_heads := fz_heads fz
+       ; fz_moved := fz_moved fz
+       ; fz_param := m ; fz_pob_on := false |};;
+    ret tt.
+
+  (* Toggle the transient observation-context flag around S1/S2 pick sites. *)
+  Definition pob_set_ctx (b : bool) : GenLLVM unit :=
+    fz <- freeze_get;;
+    metadata .@ freeze_st' .=
+      {| fz_bits := fz_bits fz
+       ; fz_heads := fz_heads fz
+       ; fz_moved := fz_moved fz
+       ; fz_param := fz_param fz ; fz_pob_on := b |};;
+    ret tt.
+
+  (* [param-obs-ban D1] the hard pool filter: drop every carrier whose mask
+     intersects pbits. Pure; the call site gates on param_ban_on AND fz_pob_on
+     (so it fires ONLY inside an observation-feeding pick). pbits=0 (main, or a
+     seedless helper at call_seed=0) => identity => ban vacuous. Non-value picks
+     (types/globals) carry mask 0 => never excluded. *)
+  Definition pob_filter_pool {a} (argmap : IM.Raw.t N) (pbits : N)
+    (pool : IM.Raw.t a) : IM.Raw.t a :=
+    if N.eqb pbits 0%N
+    then pool
+    else
+      IM.Raw.fold
+        (fun (k : Z) (v : a) (acc : IM.Raw.t a) =>
+           let m := match IM.Raw.find k argmap with
+                    | Some mv => mv
+                    | None => 0%N
+                    end in
+           if N.eqb (N.land m pbits) 0%N
+           then IM.Raw.add k v acc
+           else acc)
         pool (IM.Raw.empty _).
 
   (* #[global] Instance STGST : Monad (stateT GenState G). *)
@@ -2918,6 +3005,18 @@ Section ExpGenerators.
                         fz <- freeze_get;;
                         ret (freeze_filter_pool argmap_f fz focused_all)
                    else ret focused_all);;
+       (* [param-obs-ban D1] hard-exclude param-tainted carriers WHEN inside an
+          observation-feeding pick context (fz_pob_on true — set only around the
+          S1 cond-br condition and S2 loop_init operands). Own gate, own key
+          (fz_param); at knob 0 this is `ret focused` (no state read, no
+          randomness) => stream-identical. *)
+       focused <- (if param_ban_on
+                   then fz <- freeze_get;;
+                        if fz_pob_on fz
+                        then argmap_p <- use (metadata .@ arg_set');;
+                             ret (pob_filter_pool argmap_p (fz_param fz) focused)
+                        else ret focused
+                   else ret focused);;
        (* [route-A bias] soft-prefer tainted (arg-derived) candidates. See ROUTE_A_IMPL §3-bias.
           Build the tainted subset (arg_set != 0) of the candidates, pick from it, and keep
           that pick with prob w/(w+1); otherwise fall back to the original unbiased pick (so
@@ -4880,7 +4979,15 @@ Section InstrGenerators.
                    (if Nat.eqb route_a_obs_freeze 0
                     then ret tt
                     else _ <- cur_mask_take;; ret tt);;
+                   (* [param-obs-ban D1] S1: the cond-br condition is an
+                      observation — arm the ban filter around its pick (its OWN
+                      gate, not riding the freeze `if`). Every ident carrying a
+                      param bit is dropped from the pool; the sz-0 TYPE_I fallback
+                      always keeps the weight-10 EXP_Integer branch, so an empty
+                      ident pool yields a constant, never a crash. *)
+                   (if param_ban_on then pob_set_ctx true else ret tt);;
                    c <- gen_exp_sz0 (TYPE_I 1);;
+                   (if param_ban_on then pob_set_ctx false else ret tt);;
                    (if Nat.eqb route_a_obs_freeze 0
                     then ret tt
                     else cm <- cur_mask_take;;
@@ -4946,7 +5053,14 @@ Section InstrGenerators.
          (* TODO: make it so I can generate constant expressions *)
          (* [obs-freeze P0.a] stream-neutral Ent-returning swap (loop_init's mask is
             ALREADY correct at HEAD — its operand picks pass gen_var_ent). *)
+         (* [param-obs-ban D1] S2: every loop-control value roots at loop_init, so
+            banning param-tainted operands from loop_init's gen_op picks cleans the
+            whole loop-control chain (loop_cmp/select/loop_cond/next_cond). Arm the ban
+            around the operand picks only; the ibinop leaves fall back to integer
+            literals when the pool empties (gen_ibinop_exp_typ, sz-0 fallback). *)
+         (if param_ban_on then pob_set_ctx true else ret tt);;
          '(loop_init_instr_id, loop_init_instr, loop_init_ent) <- gen_op_instr_of_typ_ent (TYPE_I 32) (* TODO: big ints *);;
+         (if param_ban_on then pob_set_ctx false else ret tt);;
          let loop_init_instr_raw_id := instr_id_to_raw_id "loop init id" loop_init_instr_id in
          (* [obs-freeze D1/P0.a] the ONE mask that matters: every loop-control value
             roots at loop_init (+constants). Pure read; gated to 0 at knob 0. *)
@@ -5215,6 +5329,18 @@ Section InstrGenerators.
                                     arg_mask_set (unEnt e) (N.shiftl 1 (N.of_nat i)))
                           (List.combine (List.seq 0 (List.length arg_ents)) arg_ents);;
            ret tt)
+     else ret tt);;
+    (* [param-obs-ban D1] capture this function's param bits (helpers only; main
+       is never banned — observing its own args is the very leak under test).
+       At route_a_call_seed<>0 each formal #i was just seeded bit 2^i above, so
+       the union is exactly N.ones(#formals); at call_seed=0 nothing is seeded =>
+       0 => the ban is vacuous (stated precondition). Also clears the transient
+       observation-context flag for the new function. Gated on the ban knob: at
+       knob 0 nothing is written, so the stream is byte-identical to HEAD. *)
+    (if param_ban_on
+     then pob_set_param (if is_main name then 0%N
+                         else if Nat.eqb route_a_call_seed 0 then 0%N
+                         else N.ones (N.of_nat (List.length arg_ents)))
      else ret tt);;
     (* [route-A param-cell] (r6, §4.3b) also seed the POINTEE cell of each pointer param —
        the live half of a pointer source. Gated by route_a_param_cell (0 = stream-identical). *)

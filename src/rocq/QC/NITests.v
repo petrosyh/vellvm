@@ -674,6 +674,46 @@ Extract Constant time_genpartner =>
     case, so no separate gate is needed. (Memory is not varied: this
     generator has no memory input; secret-dependent addresses still surface
     in the trace.) *)
+(* ===================================================================== *)
+(*  [param-obs-ban D2] per-test funnel probe (PLAN_param-obs-ban section 3  *)
+(*  D2). Flag-gated; DEFAULT OFF. When obsban_probe := false the emit       *)
+(*  branch folds away at extraction (the two if-branches DIFFER, so this is *)
+(*  the kept-vs-elided pattern, NOT the deleted equal-branch case), leaving *)
+(*  the checker value literally teq -- byte-identical stream. Flip to true  *)
+(*  + rebuild for a probe-on run (RNG-neutrality is then checked by         *)
+(*  proghash identity vs the off run). Per test that REACHES the trace      *)
+(*  comparison (discards never do) it appends one line                      *)
+(*  seq / proghash / base_args / partner_args / TOBS_REGS / trace_eq /      *)
+(*  verdict to /tmp/obsban_probe.txt. proghash = Digest of prog_str = md5   *)
+(*  of the .ll file (matches the corpus-wrapper archive key), so the        *)
+(*  offline analyzer joins probe rows to archived programs on it. TOBS_REGS *)
+(*  = pub_regs (args the partner HELD FIXED = the public partition). Both   *)
+(*  arg VECTORS logged. Runs during Step 2.                                 *)
+(* ===================================================================== *)
+Definition obsban_probe : bool := false.
+
+(* [param-obs-ban D2] comma-join register names (Show (list raw_id) concatenates
+   with no delimiter, which the analyzer cannot re-split reliably). *)
+Definition obsban_join_comma (l : list raw_id) : string :=
+  match map show l with
+  | [] => ""
+  | x :: xs => fold_left (fun acc s => acc ++ "," ++ s) xs x
+  end.
+
+(* seq | proghash(prog_str) | base | partner | tobs | trace_eq | verdict.
+   Returns the trace_eq it was given, so threading it leaves the verdict
+   unchanged; the ref counter gives the per-run seq. *)
+Axiom obsban_emit : string -> string -> string -> string -> bool -> bool.
+Extract Constant obsban_emit =>
+  "let __obseq = ref 0 in
+   fun prog_str base_s partner_s tobs_s teq ->
+     incr __obseq;
+     let oc = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/obsban_probe.txt"" in
+     Printf.fprintf oc ""%d | %s | %s | %s | %s | %b | %s\n""
+       !__obseq (Digest.to_hex (Digest.string prog_str)) base_s partner_s tobs_s teq
+       (if teq then ""PASS"" else ""KILL"");
+     close_out oc; teq".
+
 Definition vellvm_taint_soundness_partition (p : string + PROG) : Checker :=
   match p with
   | inl msg => discard_with ("generator failed: " ++ msg)
@@ -747,8 +787,19 @@ Definition vellvm_taint_soundness_partition_fast (p : string + PROG) : Checker :
                        | None =>
                            discard_with "obs run incomplete (timeout/error)"
                        | Some args_obs_raw =>
-                           if time_cmp (fun _ =>
-                                obs_trace_eqb (z_to_obs base_obs_raw) (z_to_obs args_obs_raw))
+                           let teq := time_cmp (fun _ =>
+                                obs_trace_eqb (z_to_obs base_obs_raw) (z_to_obs args_obs_raw)) in
+                           (* [param-obs-ban D2] flag-gated per-test probe (default OFF
+                              => folds to `teq`, stream-identical). Returns teq so the
+                              verdict is unchanged. pub_regs = TOBS_REGS; both arg
+                              vectors logged; proghash computed from prog_str. *)
+                           let teq' := (if obsban_probe
+                                        then obsban_emit prog_str
+                                               (to_caml_str (show base_args))
+                                               (to_caml_str (show args'))
+                                               (to_caml_str (obsban_join_comma pub_regs)) teq
+                                        else teq) in
+                           if teq'
                            then checker true
                            else whenFail
                                   ("NI unsound (or taint/real obs diverge). "
