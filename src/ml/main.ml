@@ -391,6 +391,11 @@ let args =
     , Set Driver.interpret
     , "interpret ll program starting from 'main' (same as -interpret)" )
   ; ("-debug", Set Interpreter.debug_flag, "enable debugging trace output")
+  ; ( "-select-probe"
+    , Set Selprobe.enabled
+    , "PROBE-ONLY (never for kill/UB runs): with -interpret-obs-args, emit one \
+       SELECT_EVAL line per dynamic %sel<N> select evaluation (eager cond/arm \
+       concretization). Off => byte-identical to a normal run." )
   ; ("-v", Set Platform.verbose, "enables more verbose compilation output")
   ; ( "-genalive2"
     , Unit test_genAlive2

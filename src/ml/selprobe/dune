@@ -1,0 +1,4 @@
+(library
+ (name selprobe)
+ (wrapped false)
+ (synopsis "select-probe SELECT_EVAL emitter (Vellvm NI select cycle, probe-only)"))

@@ -33,6 +33,10 @@ From Vellvm Require
      NI.TaintTracker
      (* QC.QCVellvm *).
 
+(* [select-probe] bring DenotationObs into scope so the Extract Constant directives
+   below can name its top-level probe primitives (sel_probe_on / sel_probe_emit). *)
+From Vellvm Require Import Semantics.DenotationObs.
+
 Set Extraction AccessOpaque.
 
 From QuickChick Require Import RandomQC.
@@ -71,6 +75,12 @@ Extract Constant print_msg => "let camlstring_of_coqstring (s: char list) =
   | c :: s -> Bytes.set r pos c; fill (pos + 1) s
   in Bytes.to_string (fill 0 s)
 in fun msg -> print_string (camlstring_of_coqstring msg ^ ""\n"")".
+
+(* [select-probe] realize the SELECT_EVAL probe primitives (DenotationObs.v) as impure
+   OCaml (Selprobe library). sel_probe_on reads the -select-probe runtime flag (off in
+   every kill/UB/normal run); sel_probe_emit prints one SELECT_EVAL line. *)
+Extract Constant sel_probe_on => "(fun _ -> !Selprobe.enabled)".
+Extract Constant sel_probe_emit => "(fun name rest -> Selprobe.emit name rest)".
 
 (* OCaml pervasive types ---------------------------------------------------- *)
 (* Extract Inlined Constant LLVMAst.int => "int". *)

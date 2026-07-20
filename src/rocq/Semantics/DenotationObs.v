@@ -121,6 +121,26 @@ Open Scope N_scope.
     itrees in the second phase.
  *)
 
+(* [select-probe] impure primitives for the SELECT_EVAL probe build
+   (PLAN_select-sibling-exclusion §5 Step-1 runtime probe). Both have pure/inert
+   bodies here, so the stock pipeline and all proofs see them as no-ops (exactly like
+   [print_msg] in LLVMEvents.v). They are REPLACED during extraction
+   (ml/extracted/Extract.v) with OCaml [Selprobe] realizations:
+     - [sel_probe_on tt] reads a runtime flag set by the driver's [-select-probe]
+       option (false in every kill / UB-gate / normal run);
+     - [sel_probe_emit name rest] prints one "SELECT_EVAL sid=<N> occ=<k> <rest>" line
+       (sid parsed from the [%sel<N>] register name, occ from per-run interpreter
+       state).
+   They are used ONLY inside the probe hook in [denote_instr] below, which is gated on
+   [sel_probe_on tt]. With the flag off the hook is [Ret tt] — no events, no RNG
+   perturbation, no OBS_TRACE change — so the normal binary is byte-identical. The
+   probe path additionally EAGERLY concretizes the condition and selected arm (a
+   documented probe-only timing deviation vs the lazy semantics); it is never used for
+   kill or UB-gate runs. Kept at file top level (not inside the functor) so the
+   [Extract Constant] directives address a stable, unmangled name. *)
+Definition sel_probe_on (_ : unit) : bool := false.
+Definition sel_probe_emit (name rest : string) : unit := tt.
+
 Module DenotationObs (LP : LLVMParams) (MP : MemoryParams LP) (Byte : ByteModule LP.ADDR LP.IP LP.SIZEOF LP.Events MP.BYTE_IMPL) (CP : ConcretizationParams LP MP Byte).
   Import CP.
   Import CONC.
@@ -390,6 +410,68 @@ Module DenotationObs (LP : LLVMParams) (MP : MemoryParams LP) (Byte : ByteModule
     denote_exp None o.
   Arguments denote_op _ : simpl nomatch.
 
+  (* [select-probe] render a concretized arm dvalue as a single space-free token for
+     the SELECT_EVAL record (poison -> "P", integer -> its unsigned decimal, anything
+     else -> "?"). *)
+  Definition sel_probe_val_str (dv : dvalue) : string :=
+    match dv with
+    | DVALUE_Poison _ => "P"
+    | @DVALUE_I _ x   => string_of_Z (unsigned x)
+    | _               => "?"
+    end.
+
+  (* [select-probe] eager evaluation of one [%sel<N>] select for the probe: concretize
+     the CONDITION eagerly (mirroring TERM_Br's poison handling), then — only for the
+     SELECTED arm (the lazy semantics never forces the other) — concretize that arm,
+     and emit one SELECT_EVAL record. The record is carried as the payload of an
+     impure [Debug] event: [event_obs] returns [None] for [Debug], so it is never
+     added to OBS_TRACE, and the [Debug]-as-carrier idiom (cf. [debug]/[print_msg])
+     guarantees the impure [sel_probe_emit] call is not eliminated. Probe-only; runs
+     only when [sel_probe_on tt]. *)
+  Definition sel_probe_eval (name : string) (dt : dtyp) (cnd : exp dtyp)
+                            (dt1 : dtyp) (op1 : exp dtyp) (dt2 : dtyp) (op2 : exp dtyp)
+    : itree exp_E unit :=
+    ucnd <- denote_exp (Some dt) cnd ;;
+    dcnd <- concretize_or_pick_unique ucnd ;;
+    match dcnd with
+    | @DVALUE_I 1 bit =>
+        if equ bit one
+        then uarm <- denote_exp (Some dt1) op1 ;;
+             darm <- concretize_or_pick_unique uarm ;;
+             trigger (Debug (sel_probe_emit name
+               ("cond=1 arm=1 v1=" ++ sel_probe_val_str darm ++ " v2=-")))
+        else uarm <- denote_exp (Some dt2) op2 ;;
+             darm <- concretize_or_pick_unique uarm ;;
+             trigger (Debug (sel_probe_emit name
+               ("cond=0 arm=2 v1=- v2=" ++ sel_probe_val_str darm)))
+    | DVALUE_Poison _ =>
+        trigger (Debug (sel_probe_emit name "cond=P arm=- v1=- v2=-"))
+    | _ =>
+        trigger (Debug (sel_probe_emit name "cond=? arm=- v1=- v2=-"))
+    end.
+
+  (* [select-probe] fire the probe for a [%sel<N>]-named [OP_Select] result only
+     (generator's knob-on select naming; the loop machinery's [%v] selects are not
+     probed). Any other instruction is a no-op. *)
+  Definition sel_probe_hook (id : raw_id) (op : exp dtyp) : itree instr_E unit :=
+    match id, op with
+    | Name s, OP_Select (dt, cnd) (dt1, op1) (dt2, op2) =>
+        if String.prefix "sel" s
+        then translate exp_to_instr (sel_probe_eval s dt cnd dt1 op1 dt2 op2)
+        else Ret tt
+    | _, _ => Ret tt
+    end.
+
+  (* [select-probe] pure relevance test: does this instruction get the probe hook at
+     all? Non-relevant instructions must take the VERBATIM stock denotation shape even
+     with the probe flag ON — the earlier per-instruction [hook ;; stock] bind changed
+     the itree shape of EVERY pure op and stack-overflowed on loop-heavy programs. *)
+  Definition sel_probe_relevant (id : raw_id) (op : exp dtyp) : bool :=
+    match id, op with
+    | Name s, OP_Select _ _ _ => String.prefix "sel" s
+    | _, _ => false
+    end.
+
   (* An instruction has only side-effects, it therefore returns [unit] *)
   Definition denote_instr
     (i: (instr_id * instr dtyp)) (varargs : option ADDR.addr) : itree instr_E unit :=
@@ -397,8 +479,17 @@ Module DenotationObs (LP : LLVMParams) (MP : MemoryParams LP) (Byte : ByteModule
     (* Pure operations *)
 
     | (IId id, INSTR_Op op) =>
-        uv <- translate exp_to_instr (denote_op op) ;;
-        trigger (LocalWrite id uv)
+        (* [select-probe] gate: with the flag off (every kill/UB/normal run), and for
+           every non-[%sel] instruction even with the flag ON, the [else] branch is the
+           verbatim stock denotation — same itree shape, so behaviour is byte-identical
+           and loop-heavy programs keep the stock stack behaviour. Only [%sel<N>]
+           OP_Select instructions (rare) pay the extra hook bind. *)
+        if andb (sel_probe_on tt) (sel_probe_relevant id op)
+        then sel_probe_hook id op ;;
+             uv <- translate exp_to_instr (denote_op op) ;;
+             trigger (LocalWrite id uv)
+        else uv <- translate exp_to_instr (denote_op op) ;;
+             trigger (LocalWrite id uv)
 
     (* Allocation *)
     | (IId id, INSTR_Alloca dt annotations) =>

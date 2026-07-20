@@ -217,6 +217,9 @@ let interpret_with_args_obs
            LLVMAst.toplevel_entity
            list )
     : (BinNums.coq_Z list * DV.dvalue, exit_condition) result =
+  (* [select-probe] reset the per-sid occ counters so counts don't leak across
+     programs. No-op (empty table) unless -select-probe is active. *)
+  Selprobe.reset ();
   let arg_uvals = List.map i32_uvalue_of_int args in
   let args_itree =
     lazy (ITreeDefinition.Coq_go (ITreeDefinition.RetF (Obj.magic arg_uvals)))
@@ -268,6 +271,10 @@ let interpret_with_args_taint_obs
            LLVMAst.toplevel_entity
            list )
     : (BinNums.coq_Z list * TaintTracker.tstate * DV.dvalue, exit_condition) result =
+  (* [select-probe] the base run (taint pipeline) also denotes through
+     DenotationObs, so reset the per-sid occ counters here too. No-op unless
+     -select-probe is active. *)
+  Selprobe.reset ();
   let arg_uvals = List.map i32_uvalue_of_int args in
   let mcfg =
     TypToDtyp.convert_types

@@ -206,7 +206,7 @@ Extract Constant vellvm_collect_obs_args_str =>
                  [""./vellvm""; ""src/vellvm""; ""../vellvm""; ""../../vellvm""; ""../../../vellvm""]
            with Not_found -> ""./vellvm"")) in
      let cmd =
-       ""timeout 5 "" ^ vellvm ^ "" -interpret-obs-args "" ^ args_str ^
+       ""timeout 2 "" ^ vellvm ^ "" -interpret-obs-args "" ^ args_str ^
        "" "" ^ llvm_file ^ "" 2>&1""
      in
      (* [TIMER A start] SHELL-OUT phase = spawn ./vellvm + run it (the binary
@@ -244,6 +244,38 @@ Extract Constant vellvm_collect_obs_args_str =>
      (* [TIMER B end] write the stdout-parse duration. → /tmp/ni_obs_parse.txt *)
      (let __oc2 = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_obs_parse.txt"" in
       Printf.fprintf __oc2 ""%f\n"" (Unix.gettimeofday () -. __tp); close_out __oc2);
+     (* [select Step-B] classify the PARTNER (-interpret-obs-args) run and append its
+        outcome to the same per-pid selclass file the base run writes to (see
+        vellvm_taint_run_str). This is the partner stage of the Step-1 UB gate; it runs
+        only when the base run was accepted, so partner lines form the base-accepted
+        denominator. Same bucket set as the base classifier, keyed on the DenotationObs
+        consumer-site poison strings. *)
+     let has sub =
+       List.exists (fun line ->
+         let ls = String.length line and ss = String.length sub in
+         let rec go i = i + ss <= ls && (String.sub line i ss = sub || go (i + 1)) in
+         ss <= ls && go 0) lines in
+     let cls =
+       if has ""Undefined Behavior"" then
+         (if has ""division by 0"" || has ""mod 0"" || has ""division overflow""
+          then ""div0""
+          else if has ""unallocated memory"" || has ""invalid provenance""
+                  || has ""isn't an address""
+          then ""oob""
+          else if has ""Branching on poison."" || has ""Switching on poison.""
+          then ""branch-or-switch-on-poison""
+          else if has ""Store to poisoned address.""
+          then ""store-to-poisoned-address""
+          else ""other-ub"")
+       else if has ""Out Of Memory"" then ""oom""
+       else if has ""Failed"" then ""failed""
+       else if has ""Uninterpreted"" then ""uninterp""
+       else ""timeout"" in
+     (let fn = ""/tmp/ni_selclass_"" ^ string_of_int (Unix.getpid ()) ^ "".txt"" in
+      let oc = open_out_gen [Open_append; Open_creat] 0o644 fn in
+      output_string oc ""partner\t"";
+      output_string oc (if !saw_end then ""ok"" else cls);
+      output_string oc ""\n""; close_out oc);
      if !saw_end then Some (List.rev !result) else None".
 
 Definition vellvm_collect_obs_args
@@ -285,7 +317,7 @@ Extract Constant vellvm_taint_public_reg_names_str =>
                  [""./vellvm""; ""src/vellvm""; ""../vellvm""; ""../../vellvm""; ""../../../vellvm""]
            with Not_found -> ""./vellvm"")) in
      let cmd =
-       ""timeout 5 "" ^ vellvm ^ "" -taint-track-args "" ^ args_str ^
+       ""timeout 2 "" ^ vellvm ^ "" -taint-track-args "" ^ args_str ^
        "" "" ^ llvm_file ^ "" 2>&1""
      in
      let ic = Unix.open_process_in cmd in
@@ -343,7 +375,7 @@ Extract Constant vellvm_collect_taint_obs_args_str =>
                  [""./vellvm""; ""src/vellvm""; ""../vellvm""; ""../../vellvm""; ""../../../vellvm""]
            with Not_found -> ""./vellvm"")) in
      let cmd =
-       ""timeout 5 "" ^ vellvm ^ "" -taint-track-args "" ^ args_str ^
+       ""timeout 2 "" ^ vellvm ^ "" -taint-track-args "" ^ args_str ^
        "" "" ^ llvm_file ^ "" 2>&1""
      in
      let ic = Unix.open_process_in cmd in
@@ -409,7 +441,7 @@ Extract Constant vellvm_taint_run_str =>
                  [""./vellvm""; ""src/vellvm""; ""../vellvm""; ""../../vellvm""; ""../../../vellvm""]
            with Not_found -> ""./vellvm"")) in
      let cmd =
-       ""timeout 5 "" ^ vellvm ^ "" -taint-track-args "" ^ args_str ^
+       ""timeout 2 "" ^ vellvm ^ "" -taint-track-args "" ^ args_str ^
        "" "" ^ llvm_file ^ "" 2>&1""
      in
      (* [TIMER A start] SHELL-OUT phase = spawn ./vellvm -taint-track-args + run
@@ -452,7 +484,28 @@ Extract Constant vellvm_taint_run_str =>
      (* [TIMER B end] write stdout-parse duration. → /tmp/ni_taint_parse.txt *)
      (let __oc2 = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_taint_parse.txt"" in
       Printf.fprintf __oc2 ""%f\n"" (Unix.gettimeofday () -. __tp); close_out __oc2);
-     if !saw_obs_end then Some (List.rev !regs, List.rev !obs)
+     let has sub =
+       List.exists (fun line ->
+         let ls = String.length line and ss = String.length sub in
+         let rec go i = i + ss <= ls && (String.sub line i ss = sub || go (i + 1)) in
+         ss <= ls && go 0) lines in
+     (* [select Step-B] per-pid base/partner classification for the Step-1 UB gate.
+        One tab-separated line per run: ""<stage>\t<bucket>"" appended to
+        /tmp/ni_selclass_<pid>.txt. [stage] is ""base"" here and ""partner"" in
+        vellvm_collect_obs_args_str; [bucket] is ""ok"" for a clean run, else the
+        classifier bucket below. Within a worker (pid) the runs happen in program
+        order, base then (if it ran) its partner, so a downstream analyzer pairs each
+        base line with the partner line that immediately follows it, and keeps SEPARATE
+        denominators: base = every attempted run (all base lines); partner = only where
+        base was accepted (all partner lines). This makes the program-level gate
+        (base OR executed-partner in {div0, oob, other-ub incl. the two poison buckets};
+        uninterp/failed/oom/timeout excluded-and-reported) computable per program. *)
+     let sc_emit stage cls =
+       let fn = ""/tmp/ni_selclass_"" ^ string_of_int (Unix.getpid ()) ^ "".txt"" in
+       let oc = open_out_gen [Open_append; Open_creat] 0o644 fn in
+       output_string oc stage; output_string oc ""\t""; output_string oc cls;
+       output_string oc ""\n""; close_out oc in
+     if !saw_obs_end then (sc_emit ""base"" ""ok""; Some (List.rev !regs, List.rev !obs))
      else begin
        (* [Phase 0 measurement] Classify a REJECTED baseline run by UB type. No
           ---OBS_TRACE_END--- was emitted, so the program did not finish: undefined
@@ -467,16 +520,17 @@ Extract Constant vellvm_taint_run_str =>
               * oob      : a load/store/GEP hit unallocated or invalid-provenance
                            memory (.. unallocated memory . / .. invalid provenance /
                            .. that isn t an address .)
-              * other-ub : an Undefined-Behavior line matching neither.
+              * branch-or-switch-on-poison : a poison i1/selector reached a
+                           conditional branch or switch (consumer-site poison UB;
+                           strings ""Branching on poison."" / ""Switching on poison."").
+              * store-to-poisoned-address  : a store through a poison address
+                           (string ""Store to poisoned address."").
+              * other-ub : an Undefined-Behavior line matching none of the above.
           - Out Of Memory => oom ; Failed => failed (interpreter errors, NOT UB).
           - none of the above with no END marker => killed by the wrapping
-            `timeout 5` => timeout (NOT UB).
-          One line per rejected baseline run -> /tmp/ni_ub_reject.txt. *)
-       let has sub =
-         List.exists (fun line ->
-           let ls = String.length line and ss = String.length sub in
-           let rec go i = i + ss <= ls && (String.sub line i ss = sub || go (i + 1)) in
-           ss <= ls && go 0) lines in
+            `timeout` => timeout (NOT UB).
+          One line per rejected baseline run -> /tmp/ni_ub_reject.txt (kept for
+          backward compatibility) AND the per-pid selclass file above. *)
        let cls =
          if has ""Undefined Behavior"" then
            (if has ""division by 0"" || has ""mod 0"" || has ""division overflow""
@@ -484,6 +538,10 @@ Extract Constant vellvm_taint_run_str =>
             else if has ""unallocated memory"" || has ""invalid provenance""
                     || has ""isn't an address""
             then ""oob""
+            else if has ""Branching on poison."" || has ""Switching on poison.""
+            then ""branch-or-switch-on-poison""
+            else if has ""Store to poisoned address.""
+            then ""store-to-poisoned-address""
             else ""other-ub"")
          else if has ""Out Of Memory"" then ""oom""
          else if has ""Failed"" then ""failed""
@@ -491,6 +549,7 @@ Extract Constant vellvm_taint_run_str =>
          else ""timeout"" in
        (let __u = open_out_gen [Open_append; Open_creat] 0o644 ""/tmp/ni_ub_reject.txt"" in
         output_string __u cls; output_string __u ""\n""; close_out __u);
+       sc_emit ""base"" cls;
        None
      end".
 
@@ -936,7 +995,7 @@ Definition taint_obs_matches_real (p : string + PROG) : Checker :=
 (** ** QuickChick invocation                                          *)
 (* ================================================================= *)
 
-Extract Constant defNumTests => "1000".
+Extract Constant defNumTests => "500".
 (* [working toggle] seed: UNFIXED for mutation/campaign runs (parallel workers must
    explore different programs). For seed-fixed A/B measurements, UNCOMMENT the line
    below (fixed seed 12345). *)

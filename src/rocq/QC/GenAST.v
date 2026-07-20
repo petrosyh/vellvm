@@ -246,6 +246,56 @@ Section GenerationState.
     {| fz_bits := 0%N; fz_heads := IM.Raw.empty _; fz_moved := 0%N
      ; fz_param := 0%N; fz_pob_on := false |}.
 
+  (* [select Step-B inventory] one static record per gen_op select emitted under the
+     knob (PLAN §5 Step-1 generator-side probe). All fields are primitive-typed
+     (N/nat/bool/list) so this record can sit BEFORE the leaf_status/sel_role
+     inductives (which are defined much later, in ExpGenerators); the recording code
+     encodes those to the small integer codes below when it pushes a record. Pure
+     metadata: it drives NO generation decision and is written ONLY on the knob-on
+     select paths, so knob 0 is byte-identical.
+       si_comp   : 0 ordinary | 1 3-way | 2 role-cnd | 3 role-v1 | 4 role-v2
+       si_level  : 3-way achieved level = number of novel-reserved draws (0..3);
+                   9 = not applicable (ordinary / single-role components)
+       si_statuses : per-draw leaf_status code, in draw order
+                     (0 pool_empty_pre | 1 pool_empty_post | 2 literal
+                      | 3 ident_no_novel | 4 ident_novel)
+       si_masks  : (role-code, returned exact mask) per drawn operand
+                   (role-code: 0 cnd | 1 v1 | 2 v2)
+       si_witness: reserved witness bits (the union of reserved bits) *)
+  Record SelInv :=
+    mkSelInv
+      { si_sid      : N
+      ; si_comp     : N
+      ; si_level    : N
+      ; si_statuses : list N
+      ; si_masks    : list (N * N)
+      ; si_witness  : N
+      ; si_in_main  : bool
+      }.
+
+  (* [select] per-run select-mixture state (PLAN_select-sibling-exclusion §3).
+     sel_in_main : is the function currently being generated `main`? The 3-way and
+       role witness components are MAIN-BODY-ONLY (§2 shadow-mask caveat: helper param
+       bits are function-local synthetic markers, so helper-level witnesses do not
+       imply main-arg-level exclusivity). Set at gen_definition_h entry from is_main,
+       write-gated on route_a_select_w (no randomness), read by the mixture roll.
+     sel_next : a FRESH GLOBAL counter for the %sel<N> select-result register names
+       (sid transport, §5). Never reset per function (backtrackMetadata restores only
+       gen_context'), so sids are program-unique.
+     sel_inv : the Step-B static inventory (list SelInv), accumulated newest-first;
+       read out (reversed) by sel_get_inv. Like sel_next, it lives in metadata (not
+       gen_context'), so it survives backtracking and is program-global. All three
+       fields ride one GenState field (the freeze_st precedent) to avoid extra lens
+       plumbing. *)
+  Record SelState :=
+    mkSelState
+      { sel_in_main : bool
+      ; sel_next    : N
+      ; sel_inv     : list SelInv
+      }.
+
+  Definition sel_empty : SelState := {| sel_in_main := false ; sel_next := 0%N ; sel_inv := [] |}.
+
   Record GenState s :=
     mkGenState
     { num_void : N
@@ -309,6 +359,8 @@ Section GenerationState.
     ; loading_fn_types : list typ
     (* [obs-freeze] per-function freeze state — see the FreezeState comment above. *)
     ; freeze_st : FreezeState
+    (* [select] select-mixture state — see the SelState comment above. *)
+    ; sel_st : SelState
     }.
 
   Instance Default_GenState {s} : Default (GenState s)
@@ -329,6 +381,7 @@ Section GenerationState.
              ; ret_bridge_budget := 0      (* [route-A ret-bridge] *)
              ; loading_fn_types := []      (* [route-A callee-bias 2b] *)
              ; freeze_st := freeze_empty   (* [obs-freeze] *)
+             ; sel_st := sel_empty         (* [select] *)
              |}
     }.
 
@@ -353,6 +406,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply num_void.
   Defined.
@@ -378,6 +432,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply num_raw.
   Defined.
@@ -403,6 +458,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply num_global.
   Defined.
@@ -428,6 +484,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply num_blocks.
   Defined.
@@ -453,6 +510,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply context.
   Defined.
@@ -478,6 +536,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply global_memo.
   Defined.
@@ -503,6 +562,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply debug_stack.
   Defined.
@@ -529,6 +589,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply arg_set.
   Defined.
@@ -554,6 +615,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply points_to.
   Defined.
@@ -580,6 +642,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply cur_mask.
   Defined.
@@ -607,6 +670,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply vec_lanes.
   Defined.
@@ -632,6 +696,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply cur_ent.
   Defined.
@@ -658,6 +723,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply cur_ret_t.
   Defined.
@@ -683,6 +749,7 @@ Section GenerationState.
         | apply x
         | apply (loading_fn_types s)
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply ret_bridge_budget.
   Defined.
@@ -709,6 +776,7 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply x
         | apply (freeze_st s)
+        | apply (sel_st s)
         ]; apply gs.
     - apply loading_fn_types.
   Defined.
@@ -735,8 +803,36 @@ Section GenerationState.
         | apply (ret_bridge_budget s)
         | apply (loading_fn_types s)
         | apply x
+        | apply (sel_st s)
         ]; apply gs.
     - apply freeze_st.
+  Defined.
+
+  (* [select] lens for the select-mixture state. *)
+  Definition sel_st' {s} : Lens' (GenState s) SelState.
+    red.
+    intros f F afa gs.
+    refine ((fun x => _) <$> afa (_ gs)); try typeclasses eauto.
+    - apply mkGenState;
+        [ apply (num_void s)
+        | apply (num_raw s)
+        | apply (num_global s)
+        | apply (num_blocks s)
+        | apply (context s)
+        | apply (global_memo s)
+        | apply (debug_stack s)
+        | apply (arg_set s)
+        | apply (points_to s)
+        | apply (cur_mask s)
+        | apply (vec_lanes s)
+        | apply (cur_ent s)
+        | apply (cur_ret_t s)
+        | apply (ret_bridge_budget s)
+        | apply (loading_fn_types s)
+        | apply (freeze_st s)
+        | apply x
+        ]; apply gs.
+    - apply sel_st.
   Defined.
 
 
@@ -812,6 +908,50 @@ Section GenerationState.
 
   Definition new_block_id : GenLLVM block_id
     := new_id (@num_blocks') (fun n => Name ("b" ++ show n)).
+
+  (* [select] select-mixture state accessors (PLAN §3). All pure state ops (no
+     randomness); every call site is gated so the knob-0 stream is byte-identical. *)
+  Definition sel_get_in_main : GenLLVM bool
+    := s <- use (metadata .@ sel_st');;
+       ret (sel_in_main s).
+
+  Definition sel_set_in_main (b : bool) : GenLLVM unit
+    := s <- use (metadata .@ sel_st');;
+       metadata .@ sel_st' .= {| sel_in_main := b ; sel_next := sel_next s ; sel_inv := sel_inv s |};;
+       ret tt.
+
+  (* Read-and-increment the fresh global select counter (sid). Never resets per
+     function -> program-unique %sel names. *)
+  Definition sel_next_id : GenLLVM N
+    := s <- use (metadata .@ sel_st');;
+       metadata .@ sel_st' .= {| sel_in_main := sel_in_main s ; sel_next := N.succ (sel_next s) ; sel_inv := sel_inv s |};;
+       ret (sel_next s).
+
+  Definition new_sel_id : GenLLVM local_id
+    := n <- sel_next_id;;
+       ret (Name ("sel" ++ show n)).
+
+  (* [select Step-B] read the sid the NEXT-minted select result register will get
+     (= the current sel_next, since sel_next_id returns it before incrementing).
+     gen_op_instr_of_typ runs gen_select_op (which pushes the inventory record) fully
+     BEFORE instr_result_id -> new_sel_id, and nothing between them touches sel_next,
+     so this peek is exactly the sid the %sel<N> register will carry. Pure read. *)
+  Definition sel_peek_next : GenLLVM N
+    := s <- use (metadata .@ sel_st');;
+       ret (sel_next s).
+
+  (* [select Step-B] push a static inventory record (newest-first). Only ever called
+     from the knob-on select paths, so knob 0 is untouched. Pure state. *)
+  Definition sel_push_inv (r : SelInv) : GenLLVM unit
+    := s <- use (metadata .@ sel_st');;
+       metadata .@ sel_st' .= {| sel_in_main := sel_in_main s ; sel_next := sel_next s ; sel_inv := r :: sel_inv s |};;
+       ret tt.
+
+  (* [select Step-B] read the accumulated inventory in generation order (oldest-first).
+     Used by a gen-only experiment to dump SELECT_INV lines alongside each program. *)
+  Definition sel_get_inv : GenLLVM (list SelInv)
+    := s <- use (metadata .@ sel_st');;
+       ret (List.rev (sel_inv s)).
 
   (* [route-A propagation] arg-provenance helpers (side-channel accumulator).
      See ROUTE_A_IMPL.private.md §2-propagation.
@@ -1093,6 +1233,30 @@ Section GenerationState.
   Definition param_ban_on : bool :=
     negb (Nat.eqb route_a_param_obs_ban 0).
 
+  (* [select D1] (PLAN_select-sibling-exclusion §3 D1) menu weight for the general
+     select producer in gen_op's NON-i1 integer arm. select share of that arm =
+     w/(10+w) (the ibinop alternative is pinned at 10). 0 = OFF and STREAM-IDENTICAL:
+     the non-i1 arm stays the bare gen_ibinop_exp call (no freq wrapper, no draw), the
+     %sel<N> result naming is inert, and the in_main flag write is skipped. Also gates
+     freq_strict, gen_leaf_sz0_masked, and every gen_select_* component (all dead at 0).
+     Litmus value 2 (share 2/12); i1 and float arms gain NO select alternative. *)
+  Definition route_a_select_w : nat := 0.
+
+  (* [select D1] mixture component weights inside gen_select_op (chosen with
+     freq_strict). ord = ordinary independent selects; 3way = the 3-way per-operand
+     witness component; role = EACH of the three single-role witness components
+     (cnd/v1/v2). The 3way and role components are MAIN-BODY-ONLY (gated on in_main,
+     §2 mask caveat); all-components-zero => ordinary-only. Defaults 0. *)
+  Definition route_a_sel_ord_w  : nat := 0.
+  Definition route_a_sel_3way_w : nat := 0.
+  Definition route_a_sel_role_w : nat := 0.
+
+  (* [select D2-dyn] role-component direction. 0 = NATURAL conditions/arms (the
+     witness-bit exclusion is still applied). 1 = LITERAL dynamics: v1-witness =>
+     condition `i1 1`, v2-witness => condition `i1 0`, cnd-witness => tainted condition
+     + literal arms 0/1. Default 0. *)
+  Definition route_a_sel_dir : nat := 0.
+
   (* ================================================================== *)
   (* [obs-freeze] state helpers. All are pure state reads/writes — no    *)
   (* randomness; every call site is knob-gated so the both-knobs-0       *)
@@ -1324,6 +1488,52 @@ Section GenerationState.
            then IM.Raw.add k v acc
            else acc)
         pool (IM.Raw.empty _).
+
+  (* ================================================================== *)
+  (* [select] mask + pool helpers (PLAN_select-sibling-exclusion §3 D2).  *)
+  (* Pure; used only on the knob-on select paths.                        *)
+  (* ================================================================== *)
+
+  (* THE select witness-exclusion predicate (a FRESH helper; do NOT reuse
+     freeze_hit_b, which carries head-exemption semantics). [used] = the reserved
+     witness bit-set; [m] = a candidate's mask. *)
+  Definition mask_intersects (used m : N) : bool :=
+    negb (N.eqb (N.land used m) 0%N).
+
+  (* Drop every candidate whose arg-mask intersects [used] (the reserved witness
+     bits). [used] = 0 => identity (ordinary selects apply no exclusion). Mirrors
+     pob_filter_pool. *)
+  Definition used_filter_pool {a} (argmap : IM.Raw.t N) (used : N)
+    (pool : IM.Raw.t a) : IM.Raw.t a :=
+    if N.eqb used 0%N
+    then pool
+    else
+      IM.Raw.fold
+        (fun (k : Z) (v : a) (acc : IM.Raw.t a) =>
+           let m := match IM.Raw.find k argmap with
+                    | Some mv => mv
+                    | None => 0%N
+                    end in
+           if mask_intersects used m
+           then acc
+           else IM.Raw.add k v acc)
+        pool (IM.Raw.empty _).
+
+  (* Emptiness test for a raw map (fold-based; robust across FMap versions). *)
+  Definition im_is_empty {a} (m : IM.Raw.t a) : bool :=
+    IM.Raw.fold (fun (_ : Z) (_ : a) (_ : bool) => false) m true.
+
+  (* The list of single-bit masks for each set bit of [m] (fuel covers the MSB). *)
+  Fixpoint bits_of_aux (fuel : nat) (bit : N) (m : N) (acc : list N) {struct fuel} : list N :=
+    match fuel with
+    | O => acc
+    | S f =>
+        let acc' := if N.testbit m bit then N.shiftl 1%N bit :: acc else acc in
+        bits_of_aux f (N.succ bit) m acc'
+    end.
+
+  Definition bits_of (m : N) : list N :=
+    bits_of_aux (N.to_nat (N.size m)) 0%N m [].
 
   (* #[global] Instance STGST : Monad (stateT GenState G). *)
   (* apply Monad_stateT. *)
@@ -1669,6 +1879,29 @@ Section GenerationState.
           (fun st => freq_ failGen (fmap (fun '(n, g) => (n, runStateT g st)) gs)).
    *)
 
+  (* [select] STRICT weighted chooser (PLAN §3 D1, r6). Stock freq_LLVM (above) is
+     a sequential-swap fold with INCLUSIVE bounds — effective per-entry probability
+     (w+1)/(k'+1), and zero-weight entries stay reachable. freq_strict instead: drop
+     zero-weight entries, take ONE strict draw over [0, total-1], and select the entry
+     whose cumulative-weight interval contains it — exact w_i/total, zero-weight entries
+     unreachable. Used only on knob-on select paths (route_a_select_w > 0), so it never
+     touches the knob-0 stream. *)
+  Fixpoint freq_strict_pick {A} (x : nat) (acc : nat) (l : list (nat * GenLLVM A)) {struct l} : GenLLVM A :=
+    match l with
+    | [] => failGen "freq_strict: index overflow"
+    | (w, g) :: rest =>
+        if Nat.ltb x (acc + w)%nat then g else freq_strict_pick x (acc + w)%nat rest
+    end.
+
+  Definition freq_strict {A} (gs : list (nat * GenLLVM A)) : GenLLVM A :=
+    let nz := List.filter (fun wg => negb (Nat.eqb (fst wg) 0)) gs in
+    let total := List.fold_left (fun acc wg => (acc + fst wg)%nat) nz 0%nat in
+    match total with
+    | O => failGen "freq_strict: empty menu"
+    | S _ =>
+        x <- lift (choose (0%nat, (total - 1)%nat));;
+        freq_strict_pick x 0%nat nz
+    end.
 
   Definition thunkGen_LLVM {A} (thunk : unit -> GenLLVM A) : GenLLVM A
     := u <- ret tt;;
@@ -1790,6 +2023,46 @@ Section GenerationState.
     := sized_LLVM (fun n =>
                      k <- lift (choose (1, n)%nat);;
                      vectorOf_LLVM k g).
+
+  (* [select Step-B] serializer for the static select inventory. One SELECT_INV line
+     per gen_op select emitted under the knob; a gen-only experiment maps this over
+     [sel_get_inv]'s output (in generation order) and dumps the lines alongside each
+     program (see PLAN §5 Step-1 generator-side probe). Decodes the small integer
+     codes stored in SelInv back to readable names. *)
+  Definition sel_comp_name (c : N) : string :=
+    match c with
+    | 0 => "ord" | 1 => "3way" | 2 => "role-cnd" | 3 => "role-v1" | 4 => "role-v2"
+    | _ => "?"
+    end%N.
+
+  Definition sel_leaf_name (c : N) : string :=
+    match c with
+    | 0 => "pool_empty_pre" | 1 => "pool_empty_post" | 2 => "literal"
+    | 3 => "ident_no_novel" | 4 => "ident_novel" | _ => "?"
+    end%N.
+
+  Definition sel_role_name (c : N) : string :=
+    match c with 0 => "cnd" | 1 => "v1" | 2 => "v2" | _ => "?" end%N.
+
+  (* Join a list of strings with a separator (no leading/trailing sep). *)
+  Definition sel_join (sep : string) (xs : list string) : string :=
+    match xs with
+    | [] => ""
+    | x :: rest => fold_left (fun acc y => (acc ++ sep ++ y)%string) rest x
+    end.
+
+  Definition show_sel_inv (r : SelInv) : string :=
+    ("SELECT_INV sid=" ++ show (si_sid r)
+     ++ " comp=" ++ sel_comp_name (si_comp r)
+     ++ " level=" ++ (if N.eqb (si_level r) 9 then "-" else show (si_level r))
+     ++ " in_main=" ++ (if si_in_main r then "1" else "0")
+     ++ " witness=" ++ show (si_witness r)
+     ++ " leaf=" ++ sel_join "," (map sel_leaf_name (si_statuses r))
+     ++ " masks=" ++ sel_join ","
+          (map (fun rm => (sel_role_name (fst rm) ++ ":" ++ show (snd rm))%string) (si_masks r)))%string.
+
+  Definition serialize_sel_inv (rs : list SelInv) : string :=
+    sel_join newline (map show_sel_inv rs).
 
   Definition run_GenLLVM {A} (g: GenLLVM A) : G (string + A) :=
     let ran := runStateT (unEitherT g) def in
@@ -2053,6 +2326,48 @@ Section TypGenerators.
        | TYPE_Void => genVoid
        | _ => (fun (n : ident) => IId (ident_to_raw_id n)) <$> genLocal τ
        end.
+
+  (* [select §5] result-register minting for select instructions: a %sel<N> name
+     (N = the fresh global select counter) instead of the ordinary %v<N>, so the
+     probe build can recover the static select id (sid) from the register. Otherwise
+     identical to genLocal/genInstrId (same add_to_local_ctx path: entity mint,
+     cur_mask_take -> result mask = union of operand masks, freeze transfer). Reached
+     ONLY when route_a_select_w <> 0 (see instr_is_select_on), so knob 0 is untouched. *)
+  Definition genSelLocalEnt (τ : typ) : GenLLVM (ident * Ent)
+    :=  n <- ID_Local <$> new_sel_id;;
+        e <- add_to_local_ctx (n, τ);;
+        ret (n, e).
+
+  Definition genSelLocal (τ : typ) : GenLLVM ident
+    := fst <$> genSelLocalEnt τ.
+
+  Definition genSelInstrIdEnt (τ : typ) : GenLLVM (instr_id * Ent)
+    := match τ with
+       | TYPE_Void => genVoidEnt
+       | _ => (fun '(n, e) => (IId (ident_to_raw_id n), e)) <$> genSelLocalEnt τ
+       end.
+
+  Definition genSelInstrId (τ : typ) : GenLLVM instr_id
+    := match τ with
+       | TYPE_Void => genVoid
+       | _ => (fun (n : ident) => IId (ident_to_raw_id n)) <$> genSelLocal τ
+       end.
+
+  (* Is [i] a knob-on select instruction? HEAD gen_op never emits OP_Select, so a
+     select from gen_op is always a knob-on select; the route_a_select_w guard keeps
+     the naming inert at knob 0 (belt-and-braces with the gen_op gate). *)
+  Definition instr_is_select_on (i : instr typ) : bool :=
+    andb (negb (Nat.eqb route_a_select_w 0))
+         (match i with
+          | INSTR_Op (OP_Select _ _ _) => true
+          | _ => false
+          end).
+
+  Definition instr_result_id (τ : typ) (i : instr typ) : GenLLVM instr_id
+    := if instr_is_select_on i then genSelInstrId τ else genInstrId τ.
+
+  Definition instr_result_id_ent (τ : typ) (i : instr typ) : GenLLVM (instr_id * Ent)
+    := if instr_is_select_on i then genSelInstrIdEnt τ else genInstrIdEnt τ.
 
   Definition add_to_typ_ctx (x : (ident * typ)) : GenLLVM unit
     := let '(n, t) := x in
@@ -3371,6 +3686,344 @@ Section ExpGenerators.
           e <- gen_exp t;;
           ret (t, e)).
 
+  (* ================================================================== *)
+  (* [select] general select producer + sibling witness-bit exclusion    *)
+  (* (PLAN_select-sibling-exclusion §3 / §5 P0). All below is reached      *)
+  (* ONLY on the knob-on paths (route_a_select_w <> 0).                    *)
+  (* ================================================================== *)
+
+  (* [P0 point 7] a leaf pick's pool-state outcome — a true partition. The
+     pool-empty statuses ABSORB whatever untainted-fallback leaf was emitted; the
+     last three carry the post-exclusion-tainted-pool-nonempty conjunct. Used to
+     LABEL each draw; the 3-way degradation gates on the returned witness bits
+     (novel = mask \ union-of-prior-masks), which subsume this label. *)
+  Inductive leaf_status : Set :=
+  | LS_pool_empty_pre   (* pre-exclusion tainted pool empty *)
+  | LS_pool_empty_post  (* pre nonempty, post-used-exclusion tainted pool empty *)
+  | LS_literal          (* post nonempty, the 320/10 freq chose a literal *)
+  | LS_ident_no_novel   (* post nonempty, ident emitted, mask 0 (no novel bit) *)
+  | LS_ident_novel.     (* post nonempty, ident emitted with a novel bit (mask <> 0) *)
+
+  Inductive sel_role : Set := SR_cnd | SR_v1 | SR_v2.
+
+  Definition sel_role_eqb (a b : sel_role) : bool :=
+    match a, b with
+    | SR_cnd, SR_cnd | SR_v1, SR_v1 | SR_v2, SR_v2 => true
+    | _, _ => false
+    end.
+
+  (* [select Step-B inventory] encode leaf_status / sel_role to the small integer
+     codes stored in a SelInv record (see the SelInv comment near SelState). *)
+  Definition leaf_status_code (s : leaf_status) : N :=
+    match s with
+    | LS_pool_empty_pre  => 0
+    | LS_pool_empty_post => 1
+    | LS_literal         => 2
+    | LS_ident_no_novel  => 3
+    | LS_ident_novel     => 4
+    end.
+
+  Definition sel_role_code (r : sel_role) : N :=
+    match r with SR_cnd => 0 | SR_v1 => 1 | SR_v2 => 2 end.
+
+  (* Build a partial inventory record (sid/in_main are filled by gen_select_op via
+     sel_inv_finalize, which alone knows them). [comp] is the component code, [level]
+     the 3-way achieved level (9 = n/a), [witness] the reserved bits, [statuses] the
+     per-draw leaf_status codes, [masks] the (role-code, returned-mask) pairs. *)
+  Definition mk_sel_inv (comp level witness : N) (statuses : list N)
+                        (masks : list (N * N)) : SelInv :=
+    {| si_sid      := 0%N
+     ; si_comp     := comp
+     ; si_level    := level
+     ; si_statuses := statuses
+     ; si_masks    := masks
+     ; si_witness  := witness
+     ; si_in_main  := false
+    |}.
+
+  (* Stamp the sid (peeked from sel_next) and in_main onto a partial record. *)
+  Definition sel_inv_finalize (sid : N) (im : bool) (r : SelInv) : SelInv :=
+    {| si_sid      := sid
+     ; si_comp     := si_comp r
+     ; si_level    := si_level r
+     ; si_statuses := si_statuses r
+     ; si_masks    := si_masks r
+     ; si_witness  := si_witness r
+     ; si_in_main  := im
+    |}.
+
+  (* Assemble a select expression in NORMAL OP_Select order (cond, v1, v2),
+     regardless of the order the operands were internally generated. *)
+  Definition mk_select (t : typ) (c a b : exp typ) : exp typ :=
+    OP_Select (TYPE_I 1, c) (t, a) (t, b).
+
+  (* Size-0 literal for a scalar integer leaf type (mirrors gen_size_0's TYPE_I n). *)
+  Definition gen_scalar_int_lit (t : typ) : GenLLVM (exp typ) :=
+    match t with
+    | TYPE_I n => z <- lift (gen_unsigned_bitwidth n);; ret (EXP_Integer z)
+    | _ => failGen "gen_scalar_int_lit: non-int leaf type"
+    end.
+
+  (* [P0 API, 7 points] size-0 leaf pick with a used-mask witness exclusion, as a
+     FILTERED, DEFERRED-COMMIT variant of gen_var_ent (which commits cur_mask/cur_ent/
+     freeze DURING the pick, before the 320/10 ident-vs-literal choice, leaving ghost
+     provenance on a literal outcome). Here:
+       (1) candidate selection is side-effect-free (no commit during the pick);
+       (2) the [used] exclusion (mask_intersects) applies to BOTH the tainted-preferred
+           tier AND the 75/25 fallback pool (else a sibling could return the witness
+           bit through the fallback, voiding the targeting);
+       (3) the existing filter stack (obs-freeze mode-2 pool filter, param-ban filter,
+           tainted tier + mode-1 soft demotion) is preserved underneath;
+       (4) commit cur_mask + cur_ent + freeze consumption EXACTLY ONCE, per-operand-
+           immediate, and only when an identifier is actually emitted; a literal
+           outcome commits nothing (mask 0, no freeze, cur_ent cleared);
+       (5) the RETURNED exact mask is OR-accumulated by the caller (via cur_mask, so
+           the select result carries M_cnd u M_v1 u M_v2);
+       (7) returns a leaf_status on disjoint pool-state predicates.
+     Only ever called with route_a_select_w <> 0; knob 0 is untouched.
+     NB: tainted-pool emptiness mirrors gen_var_ent (any type, mask <> 0) for pre_empty;
+     post_empty is taken from the actual type/is_deterministic-filtered pick (accurate),
+     so it captures exactly "no pickable used-excluded witness of this type" — the
+     fallback-leaf case the label is meant to absorb. *)
+  Definition gen_leaf_sz0_masked (used : N) (t : typ) : GenLLVM (exp typ * N * leaf_status) :=
+    let focus := gen_context' .@ variable_type' in
+    let filter := (vt <- queryl variable_type';;
+                   if normalized_typ_eq t vt then withl is_deterministic' else mzero) in
+    focused_all <- use focus;;
+    (* [obs-freeze D1-hard] mode 2: exclude frozen-hit carriers from the full pool. *)
+    focused0 <- (if Nat.eqb route_a_obs_freeze 2
+                 then argmap_f <- use (metadata .@ arg_set');;
+                      fz <- freeze_get;;
+                      ret (freeze_filter_pool argmap_f fz focused_all)
+                 else ret focused_all);;
+    (* [param-obs-ban D1] hard-exclude param-tainted carriers inside an obs-feeding pick. *)
+    focused <- (if param_ban_on
+                then fz <- freeze_get;;
+                     if fz_pob_on fz
+                     then argmap_p <- use (metadata .@ arg_set');;
+                          ret (pob_filter_pool argmap_p (fz_param fz) focused0)
+                     else ret focused0
+                else ret focused0);;
+    argmap <- use (metadata .@ arg_set');;
+    (* [obs-freeze D1-soft] mode 1: demote frozen-hit carriers from the tainted tier. *)
+    ofz <- (if Nat.eqb route_a_obs_freeze 1
+            then fz <- freeze_get;; ret (Some fz)
+            else ret (None : option FreezeState));;
+    (* tainted subset (pre-exclusion), exactly gen_var_ent's build. *)
+    let tainted_pre :=
+      IM.Raw.fold
+        (fun (k : Z) v acc =>
+           match IM.Raw.find k argmap with
+           | Some m =>
+               if N.eqb m 0%N then acc
+               else match ofz with
+                    | Some fz => if freeze_hit_b (fz_bits fz) (fz_heads fz) k m then acc
+                                 else IM.Raw.add k v acc
+                    | None => IM.Raw.add k v acc
+                    end
+           | None => acc
+           end) focused (IM.Raw.empty _) in
+    let pre_empty := im_is_empty tainted_pre in
+    (* [P0 point 2] used-exclusion on BOTH tiers. *)
+    let tainted_post := used_filter_pool argmap used tainted_pre in
+    let fallback_pool := used_filter_pool argmap used focused in
+    (* [P0 point 1] side-effect-free bias pick (no commit here). *)
+    oe_t <- gen_IntMapRaw_ent_filter tainted_post filter;;
+    let post_empty := match oe_t with None => true | Some _ => false end in
+    oe <- (match oe_t with
+           | Some _ =>
+               if Nat.eqb route_a_bias_w 0
+               then gen_IntMapRaw_ent_filter fallback_pool filter
+               else b <- lift (choose (0%nat, route_a_bias_w));;
+                    if Nat.eqb b 0%nat
+                    then gen_IntMapRaw_ent_filter fallback_pool filter
+                    else ret oe_t
+           | None => gen_IntMapRaw_ent_filter fallback_pool filter
+           end);;
+    oid <- (match oe with
+            | Some e => nm <- use (gen_context' .@ entl e .@ name');;
+                        ret (match nm with Some n => Some (e, n) | None => None end)
+            | None => ret None
+            end);;
+    (* literal branch: commit nothing, clear cur_ent, mask 0. *)
+    let lit_gen : GenLLVM (exp typ * N * leaf_status) :=
+      lit <- gen_scalar_int_lit t;;
+      _ <- cur_ent_take;;
+      ret (lit, 0%N, if pre_empty then LS_pool_empty_pre
+                     else if post_empty then LS_pool_empty_post else LS_literal) in
+    match oid with
+    | None => lit_gen
+    | Some (e, n) =>
+        let m := match IM.Raw.find (unEnt e) argmap with Some mv => mv | None => 0%N end in
+        (* ident branch: [P0 point 4] single deferred commit. *)
+        let id_gen : GenLLVM (exp typ * N * leaf_status) :=
+          cur_mask_accum (unEnt e);;
+          cur_ent_set (unEnt e);;
+          freeze_consume_pick (unEnt e);;
+          ret (EXP_Ident n, m,
+               if pre_empty then LS_pool_empty_pre
+               else if post_empty then LS_pool_empty_post
+               else if N.eqb m 0%N then LS_ident_no_novel
+               else LS_ident_novel) in
+        freq_strict [(10%nat, lit_gen); (320%nat, id_gen)]
+    end.
+
+  (* Draw one role's leaf (i1 for the condition, t for an arm), filtered on the
+     reserved witness bits [W]. Returns (role, exp, exact mask, leaf_status). The
+     status is kept (not discarded as before) for the Step-B inventory. *)
+  Definition sel_draw (t : typ) (W : N) (role : sel_role) : GenLLVM (sel_role * exp typ * N * leaf_status) :=
+    let ty := match role with SR_cnd => TYPE_I 1 | _ => t end in
+    '(e, m, st) <- gen_leaf_sz0_masked W ty;;
+    ret (role, e, m, st).
+
+  (* [D2-3way] one forward pass over a randomized role order (no retries; drawn
+     operands always kept). [W] = reserved witness bits (filter); [U] = union of
+     returned masks (novelty reference); [level] = number of novel-reserved draws so
+     far (the achieved 3-way level, 0..3). Per draw: if the returned mask has a novel
+     bit (mask \ U <> 0) reserve one uniformly and bump the level; else the level is
+     unchanged (this draw did not contribute a witness). The emitted operands are the
+     same either way. Also threads the Step-B inventory accumulators: per-draw
+     leaf_status codes and (role-code, returned-mask) pairs, in draw order. *)
+  Fixpoint sel_3way_go (t : typ) (W U level : N) (roles : list sel_role)
+    (acc_e : list (sel_role * exp typ)) (acc_s : list N) (acc_m : list (N * N))
+    {struct roles} : GenLLVM (list (sel_role * exp typ) * list N * list (N * N) * N * N) :=
+    match roles with
+    | [] => ret (acc_e, List.rev acc_s, List.rev acc_m, W, level)
+    | role :: rest =>
+        '(_, e, m, st) <- sel_draw t W role;;
+        let novel := N.ldiff m U in
+        '(W', level') <- (if N.eqb novel 0%N then ret (W, level)
+                          else wb <- elems_LLVM (bits_of novel);; ret (N.lor W wb, N.succ level));;
+        sel_3way_go t W' (N.lor U m) level' rest
+          ((role, e) :: acc_e)
+          (leaf_status_code st :: acc_s)
+          ((sel_role_code role, m) :: acc_m)
+    end.
+
+  (* Ordinary independent select: natural condition/arms, no exclusion (used = 0).
+     Returns the inventory record (comp = ordinary, level n/a, witness 0). *)
+  Definition gen_select_ordinary (t : typ) : GenLLVM (exp typ * SelInv) :=
+    '(c, m_c, s_c) <- gen_leaf_sz0_masked 0%N (TYPE_I 1);;
+    '(a, m_a, s_a) <- gen_leaf_sz0_masked 0%N t;;
+    '(b, m_b, s_b) <- gen_leaf_sz0_masked 0%N t;;
+    ret (mk_select t c a b,
+         mk_sel_inv 0%N 9%N 0%N
+           [leaf_status_code s_c; leaf_status_code s_a; leaf_status_code s_b]
+           [(0%N, m_c); (1%N, m_a); (2%N, m_b)]).
+
+  (* [D2 / D2-dyn] single-role witness component. Generate the target role first;
+     if its mask is 0, DEGRADE to an ordinary select (keeping the drawn operand;
+     recorded with witness = 0 under the same component code); else reserve one
+     witness bit b in it and exclude b from the other two operands.
+     route_a_sel_dir = 1 switches to literal dynamics (guaranteed arm direction /
+     unequal arms). Component codes: cnd = 2, v1 = 3, v2 = 4. Inventory statuses/masks
+     are recorded in DRAW order (target first). *)
+  Definition gen_select_role (t : typ) (role : sel_role) : GenLLVM (exp typ * SelInv) :=
+    match role with
+    | SR_cnd =>
+        '(c, m_c, s_c) <- gen_leaf_sz0_masked 0%N (TYPE_I 1);;
+        if N.eqb m_c 0%N
+        then '(a, m_a, s_a) <- gen_leaf_sz0_masked 0%N t;;
+             '(b, m_b, s_b) <- gen_leaf_sz0_masked 0%N t;;
+             ret (mk_select t c a b,
+                  mk_sel_inv 2%N 9%N 0%N
+                    [leaf_status_code s_c; leaf_status_code s_a; leaf_status_code s_b]
+                    [(0%N, m_c); (1%N, m_a); (2%N, m_b)])
+        else wb <- elems_LLVM (bits_of m_c);;
+             if Nat.eqb route_a_sel_dir 1
+             then ret (mk_select t c (EXP_Integer 0) (EXP_Integer 1),
+                       mk_sel_inv 2%N 9%N wb [leaf_status_code s_c] [(0%N, m_c)])
+             else '(a, m_a, s_a) <- gen_leaf_sz0_masked wb t;;
+                  '(b, m_b, s_b) <- gen_leaf_sz0_masked wb t;;
+                  ret (mk_select t c a b,
+                       mk_sel_inv 2%N 9%N wb
+                         [leaf_status_code s_c; leaf_status_code s_a; leaf_status_code s_b]
+                         [(0%N, m_c); (1%N, m_a); (2%N, m_b)])
+    | SR_v1 =>
+        '(a, m_a, s_a) <- gen_leaf_sz0_masked 0%N t;;
+        if N.eqb m_a 0%N
+        then '(c, m_c, s_c) <- gen_leaf_sz0_masked 0%N (TYPE_I 1);;
+             '(b, m_b, s_b) <- gen_leaf_sz0_masked 0%N t;;
+             ret (mk_select t c a b,
+                  mk_sel_inv 3%N 9%N 0%N
+                    [leaf_status_code s_a; leaf_status_code s_c; leaf_status_code s_b]
+                    [(1%N, m_a); (0%N, m_c); (2%N, m_b)])
+        else wb <- elems_LLVM (bits_of m_a);;
+             if Nat.eqb route_a_sel_dir 1
+             then '(b, m_b, s_b) <- gen_leaf_sz0_masked wb t;;
+                  ret (mk_select t (EXP_Integer 1) a b,
+                       mk_sel_inv 3%N 9%N wb
+                         [leaf_status_code s_a; leaf_status_code s_b]
+                         [(1%N, m_a); (2%N, m_b)])
+             else '(c, m_c, s_c) <- gen_leaf_sz0_masked wb (TYPE_I 1);;
+                  '(b, m_b, s_b) <- gen_leaf_sz0_masked wb t;;
+                  ret (mk_select t c a b,
+                       mk_sel_inv 3%N 9%N wb
+                         [leaf_status_code s_a; leaf_status_code s_c; leaf_status_code s_b]
+                         [(1%N, m_a); (0%N, m_c); (2%N, m_b)])
+    | SR_v2 =>
+        '(b, m_b, s_b) <- gen_leaf_sz0_masked 0%N t;;
+        if N.eqb m_b 0%N
+        then '(c, m_c, s_c) <- gen_leaf_sz0_masked 0%N (TYPE_I 1);;
+             '(a, m_a, s_a) <- gen_leaf_sz0_masked 0%N t;;
+             ret (mk_select t c a b,
+                  mk_sel_inv 4%N 9%N 0%N
+                    [leaf_status_code s_b; leaf_status_code s_c; leaf_status_code s_a]
+                    [(2%N, m_b); (0%N, m_c); (1%N, m_a)])
+        else wb <- elems_LLVM (bits_of m_b);;
+             if Nat.eqb route_a_sel_dir 1
+             then '(a, m_a, s_a) <- gen_leaf_sz0_masked wb t;;
+                  ret (mk_select t (EXP_Integer 0) a b,
+                       mk_sel_inv 4%N 9%N wb
+                         [leaf_status_code s_b; leaf_status_code s_a]
+                         [(2%N, m_b); (1%N, m_a)])
+             else '(c, m_c, s_c) <- gen_leaf_sz0_masked wb (TYPE_I 1);;
+                  '(a, m_a, s_a) <- gen_leaf_sz0_masked wb t;;
+                  ret (mk_select t c a b,
+                       mk_sel_inv 4%N 9%N wb
+                         [leaf_status_code s_b; leaf_status_code s_c; leaf_status_code s_a]
+                         [(2%N, m_b); (0%N, m_c); (1%N, m_a)])
+    end.
+
+  (* [D2-3way] 3-way per-operand witness: randomized role order + sequential
+     reservation (see sel_3way_go), reassembled in OP_Select order. Inventory:
+     comp = 3-way (1), achieved level + reserved witness bits + per-draw
+     statuses/masks come straight out of sel_3way_go. *)
+  Definition gen_select_3way (t : typ) : GenLLVM (exp typ * SelInv) :=
+    order <- elems_LLVM [ [SR_cnd; SR_v1; SR_v2]; [SR_cnd; SR_v2; SR_v1]
+                        ; [SR_v1; SR_cnd; SR_v2]; [SR_v1; SR_v2; SR_cnd]
+                        ; [SR_v2; SR_cnd; SR_v1]; [SR_v2; SR_v1; SR_cnd] ];;
+    '(exps, statuses, masks, W, level) <- sel_3way_go t 0%N 0%N 0%N order [] [] [];;
+    let find_role r := match List.find (fun re => sel_role_eqb (fst re) r) exps with
+                       | Some (_, e) => e
+                       | None => EXP_Integer 0  (* unreachable: all three roles present *)
+                       end in
+    ret (mk_select t (find_role SR_cnd) (find_role SR_v1) (find_role SR_v2),
+         mk_sel_inv 1%N level W statuses masks).
+
+  (* [D1 mixture roll] pick a component with freq_strict. The 3-way and role
+     components are main-body-only (gated on in_main). All-zero => ordinary-only.
+     [Step-B] peek the sid this select's %sel<N> result register will get (see
+     sel_peek_next), run the chosen component (which returns its partial inventory
+     record), stamp sid + in_main onto it, and push it. All recording is on the
+     knob-on path only (gen_select_op is unreachable at route_a_select_w = 0), so
+     knob 0 is byte-identical. *)
+  Definition gen_select_op (t : typ) : GenLLVM (exp typ) :=
+    im  <- sel_get_in_main;;
+    sid <- sel_peek_next;;
+    let menu : list (nat * GenLLVM (exp typ * SelInv)) :=
+      ((route_a_sel_ord_w, gen_select_ordinary t)
+        :: (if im
+            then [ (route_a_sel_3way_w, gen_select_3way t)
+                 ; (route_a_sel_role_w, gen_select_role t SR_cnd)
+                 ; (route_a_sel_role_w, gen_select_role t SR_v1)
+                 ; (route_a_sel_role_w, gen_select_role t SR_v2) ]
+            else []))%list in
+    let total := List.fold_left (fun acc wg => (acc + fst wg)%nat) menu 0%nat in
+    '(e, inv0) <- (if Nat.eqb total 0%nat then gen_select_ordinary t else freq_strict menu);;
+    sel_push_inv (sel_inv_finalize sid im inv0);;
+    ret e.
+
   Definition gen_op (t : typ) : GenLLVM (exp typ)
     := sized_LLVM
          (fun sz =>
@@ -3385,7 +4038,15 @@ Section ExpGenerators.
                       ; gen_fcmp_exp gen_deterministic_global_ident gen_deterministic_ident
                     ]
                 else
-                  gen_ibinop_exp gen_deterministic_global_ident gen_deterministic_ident isz
+                  (* [select D1] non-i1 integer arm. Knob 0 => the verbatim HEAD body
+                     (bare gen_ibinop_exp — no freq wrapper, no draw). Knob on => share
+                     the arm with the general select producer via freq_strict (ibinop
+                     pinned at 10; select at w). The i1 and float arms are untouched. *)
+                  if Nat.eqb route_a_select_w 0
+                  then gen_ibinop_exp gen_deterministic_global_ident gen_deterministic_ident isz
+                  else freq_strict
+                         [ (10%nat, gen_ibinop_exp gen_deterministic_global_ident gen_deterministic_ident isz)
+                         ; (route_a_select_w, gen_select_op (TYPE_I isz)) ]
             | TYPE_Float => gen_fbinop_exp gen_deterministic_global_ident gen_deterministic_ident TYPE_Float
             | TYPE_Double => gen_fbinop_exp gen_deterministic_global_ident gen_deterministic_ident TYPE_Double
             | _ => failGen "gen_op"
@@ -4810,7 +5471,9 @@ Section InstrGenerators.
 
   Definition gen_op_instr_of_typ (τ : typ) : GenLLVM (instr_id * instr typ)
     := i <- ret INSTR_Op <*> gen_op τ;;
-       id <- genInstrId τ;;
+       (* [select §5] name a knob-on select result %sel<N>; otherwise ordinary %v<N>.
+          At knob 0, instr_result_id = genInstrId verbatim (stream-identical). *)
+       id <- instr_result_id τ i;;
        ret (id, i).
 
   (* [obs-freeze P0.a] Ent-returning variant — stream-neutral by construction:
@@ -4819,7 +5482,7 @@ Section InstrGenerators.
      the ONE mask every loop-control value roots at). *)
   Definition gen_op_instr_of_typ_ent (τ : typ) : GenLLVM (instr_id * instr typ * Ent)
     := i <- ret INSTR_Op <*> gen_op τ;;
-       '(id, e) <- genInstrIdEnt τ;;
+       '(id, e) <- instr_result_id_ent τ i;;
        ret (id, i, e).
 
   Definition gen_op_instr : GenLLVM (instr_id * instr typ)
@@ -5342,6 +6005,10 @@ Section InstrGenerators.
                          else if Nat.eqb route_a_call_seed 0 then 0%N
                          else N.ones (N.of_nat (List.length arg_ents)))
      else ret tt);;
+    (* [select §3] record whether this function is main, for the mixture roll (the
+       3-way/role witness components are main-body-only, §2 mask caveat). Write-gated
+       on route_a_select_w so knob 0 is byte-identical; pure state, no randomness. *)
+    (if Nat.eqb route_a_select_w 0 then ret tt else sel_set_in_main (is_main name));;
     (* [route-A param-cell] (r6, §4.3b) also seed the POINTEE cell of each pointer param —
        the live half of a pointer source. Gated by route_a_param_cell (0 = stream-identical). *)
     seed_param_cells arg_ents args_t;;

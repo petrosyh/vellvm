@@ -1,0 +1,5 @@
+#!/bin/bash
+# vellvm-selprobe — PROBE-ONLY wrapper (PLAN_select-sibling-exclusion §5 Step-1).
+# Always passes -select-probe, so SELECT_EVAL emission is on. NEVER use this for kill
+# runs or the UB gate — use ./vellvm (no flag) for those (byte-identical to normal).
+exec "$(dirname "$(readlink -f "$0")")/vellvm" -select-probe "$@"

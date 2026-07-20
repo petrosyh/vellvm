@@ -11,6 +11,6 @@
  (name extracted)
  (wrapped false)
  (synopsis "ML code extracted from Coq")
- (libraries zarith)
+ (libraries zarith selprobe)
  (instrumentation
   (backend bisect_ppx)))
